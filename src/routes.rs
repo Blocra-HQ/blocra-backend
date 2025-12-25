@@ -7,6 +7,7 @@ mod contract;
 mod dashboard;
 mod query;
 mod health;
+mod payment;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -18,5 +19,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(contract::configure)
             .configure(dashboard::configure)
             .configure(query::configure)
+            .configure(payment::configure)
     );
 }
