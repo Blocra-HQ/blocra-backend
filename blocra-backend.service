@@ -1,0 +1,22 @@
+[Unit]
+Description=BlocRA Rust Backend
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/blocra-backend
+EnvironmentFile=/opt/blocra-backend/.env
+ExecStart=/opt/blocra-backend/blocra-backend
+Restart=always
+RestartSec=10
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/blocra-backend/data
+
+[Install]
+WantedBy=multi-user.target
