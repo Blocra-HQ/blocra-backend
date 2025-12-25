@@ -1,7 +1,6 @@
 use crate::{db::DbPool, models::user::*, utils::jwt, errors::AppError};
 use actix_web::HttpRequest;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -53,8 +52,6 @@ pub async fn register(
     pool: &DbPool,
     payload: RegisterPayload,
 ) -> Result<AuthResponse, AppError> {
-    let user_id = Uuid::new_v4().to_string();
-    
     // Check if user exists
     let existing: Option<User> = sqlx::query_as(
         "SELECT * FROM users WHERE email = ?"
@@ -68,16 +65,15 @@ pub async fn register(
     }
 
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, email, username, role) VALUES (?, ?, ?, 'user')
+        "INSERT INTO users (email, username, role) VALUES (?, ?, 'user')
          RETURNING *"
     )
-    .bind(&user_id)
     .bind(&payload.email)
     .bind(payload.username)
     .fetch_one(pool)
     .await?;
 
-    let token = jwt::create_token(&user.id)?;
+    let token = jwt::create_token(user.id)?;
 
     Ok(AuthResponse {
         success: true,
@@ -101,7 +97,7 @@ pub async fn login(
     // TODO: Verify password with bcrypt
     // For now, just return token
 
-    let token = jwt::create_token(&user.id)?;
+    let token = jwt::create_token(user.id)?;
 
     Ok(AuthResponse {
         success: true,
@@ -116,19 +112,17 @@ pub async fn google_authenticate(
 ) -> Result<AuthResponse, AppError> {
     // TODO: Verify Google token
     // For now, create/get user
-    let user_id = Uuid::new_v4().to_string();
     
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, google_id, role) VALUES (?, ?, 'user')
+        "INSERT INTO users (google_id, role) VALUES (?, 'user')
          ON CONFLICT(google_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
          RETURNING *"
     )
-    .bind(&user_id)
     .bind(&payload.token)
     .fetch_one(pool)
     .await?;
 
-    let token = jwt::create_token(&user.id)?;
+    let token = jwt::create_token(user.id)?;
 
     Ok(AuthResponse {
         success: true,
@@ -143,19 +137,16 @@ pub async fn wallet_authenticate(
 ) -> Result<AuthResponse, AppError> {
     // TODO: Verify wallet signature
     
-    let user_id = Uuid::new_v4().to_string();
-    
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (id, wallet_address, role) VALUES (?, ?, 'user')
+        "INSERT INTO users (wallet_address, role) VALUES (?, 'user')
          ON CONFLICT(wallet_address) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
          RETURNING *"
     )
-    .bind(&user_id)
     .bind(&payload.wallet_address)
     .fetch_one(pool)
     .await?;
 
-    let token = jwt::create_token(&user.id)?;
+    let token = jwt::create_token(user.id)?;
 
     Ok(AuthResponse {
         success: true,
@@ -175,11 +166,11 @@ pub async fn refresh_token(
     let user: User = sqlx::query_as(
         "SELECT * FROM users WHERE id = ?"
     )
-    .bind(&claims.sub)
+    .bind(claims.sub)
     .fetch_one(pool)
     .await?;
 
-    let token = jwt::create_token(&user.id)?;
+    let token = jwt::create_token(user.id)?;
 
     Ok(AuthResponse {
         success: true,
@@ -197,7 +188,7 @@ pub async fn get_current_user(
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = ?"
     )
-    .bind(&user_id)
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
 
@@ -245,7 +236,7 @@ pub async fn update_profile(
         q = q.bind(profile_picture);
     }
     
-    q = q.bind(&user_id);
+    q = q.bind(user_id);
 
     let user = q.fetch_one(pool).await?;
 

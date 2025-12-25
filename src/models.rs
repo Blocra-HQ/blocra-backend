@@ -11,4 +11,3 @@ pub use bounty::Bounty;
 pub use bounty_participant::BountyParticipant;
 pub use submission::Submission;
 pub use contract_query::ContractQuery;
-pub use subscription::*;

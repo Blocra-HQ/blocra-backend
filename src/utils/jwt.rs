@@ -4,21 +4,25 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use crate::errors::AppError;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,
+    pub sub: i64,
     pub exp: i64,
 }
 
-pub fn create_token(user_id: &str) -> Result<String, AppError> {
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+pub fn create_token(user_id: i64) -> Result<String, AppError> {
+    let secret = env::var("JWT_SECRET")
+        .unwrap_or_else(|_| {
+            log::warn!("JWT_SECRET not set, using default");
+            "default_jwt_secret_change_in_production_12345678901234567890".to_string()
+        });
     let expiration = env::var("JWT_EXPIRATION")
         .unwrap_or_else(|_| "86400".to_string())
         .parse::<i64>()
         .unwrap_or(86400);
     
     let claims = Claims {
-        sub: user_id.to_string(),
+        sub: user_id,
         exp: chrono::Utc::now().timestamp() + expiration,
     };
 
@@ -27,7 +31,11 @@ pub fn create_token(user_id: &str) -> Result<String, AppError> {
 }
 
 pub fn verify_token(token: &str) -> Result<Claims, AppError> {
-    let secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    let secret = env::var("JWT_SECRET")
+        .unwrap_or_else(|_| {
+            log::warn!("JWT_SECRET not set, using default");
+            "default_jwt_secret_change_in_production_12345678901234567890".to_string()
+        });
     
     decode::<Claims>(
         token,
@@ -38,7 +46,7 @@ pub fn verify_token(token: &str) -> Result<Claims, AppError> {
     .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))
 }
 
-pub fn extract_user_id(req: &HttpRequest) -> Result<String, AppError> {
+pub fn extract_user_id(req: &HttpRequest) -> Result<i64, AppError> {
     let auth_header = req
         .headers()
         .get("Authorization")

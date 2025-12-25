@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct User {
-    pub id: String,
+    pub id: i64,
     pub wallet_address: Option<String>,
     pub email: Option<String>,
     pub username: Option<String>,
@@ -27,7 +27,7 @@ pub struct CreateUser {
 
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
-    pub id: String,
+    pub id: i64,
     pub wallet_address: Option<String>,
     pub email: Option<String>,
     pub username: Option<String>,

@@ -1,8 +1,8 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use sqlx::SqlitePool;
 use crate::errors::AppError;
 use crate::models::subscription::*;
-use crate::utils::jwt::Claims;
+use crate::utils::jwt;
 
 // Get all available subscription plans
 pub async fn get_plans(pool: web::Data<SqlitePool>) -> Result<HttpResponse, AppError> {
@@ -11,7 +11,7 @@ pub async fn get_plans(pool: web::Data<SqlitePool>) -> Result<HttpResponse, AppE
     )
     .fetch_all(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
@@ -26,7 +26,7 @@ pub async fn get_payment_chains(pool: web::Data<SqlitePool>) -> Result<HttpRespo
     )
     .fetch_all(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
@@ -42,7 +42,7 @@ async fn is_admin(pool: &SqlitePool, user_id: i64) -> Result<bool, AppError> {
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(role == "admin")
 }
@@ -50,9 +50,9 @@ async fn is_admin(pool: &SqlitePool, user_id: i64) -> Result<bool, AppError> {
 // Get user's subscription status
 pub async fn get_subscription_status(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&req)?;
     let admin = is_admin(pool.get_ref(), user_id).await.unwrap_or(false);
 
     // Get active subscription
@@ -65,7 +65,7 @@ pub async fn get_subscription_status(
     .bind(user_id)
     .fetch_optional(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     let (has_active, reports_remaining, can_generate) = if admin {
         (true, 999999, true) // Admins have unlimited reports
@@ -88,10 +88,10 @@ pub async fn get_subscription_status(
 // Create one-time payment for single report (3 USDT)
 pub async fn create_one_time_payment(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
     req: web::Json<CreatePaymentRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
 
     // Get plan details
     let plan = sqlx::query_as::<_, SubscriptionPlan>(
@@ -127,7 +127,7 @@ pub async fn create_one_time_payment(
     .bind(&req.tx_hash)
     .execute(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?
+    .map_err(|e| AppError::DatabaseError(e))?
     .last_insert_rowid();
 
     Ok(HttpResponse::Ok().json(PaymentResponse {
@@ -140,10 +140,10 @@ pub async fn create_one_time_payment(
 // Create monthly subscription (50 USDT)
 pub async fn create_subscription(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
     req: web::Json<CreateSubscriptionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
 
     // Check if user already has active subscription
     let existing = sqlx::query_scalar::<_, i64>(
@@ -153,7 +153,7 @@ pub async fn create_subscription(
     .bind(user_id)
     .fetch_one(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     if existing > 0 {
         return Err(AppError::BadRequest("You already have an active subscription".to_string()));
@@ -196,7 +196,7 @@ pub async fn create_subscription(
     .bind(&req.tx_hash)
     .execute(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?
+    .map_err(|e| AppError::DatabaseError(e))?
     .last_insert_rowid();
 
     // Create payment transaction
@@ -213,7 +213,7 @@ pub async fn create_subscription(
     .bind(subscription_id)
     .execute(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(PaymentResponse {
         success: true,
@@ -225,10 +225,10 @@ pub async fn create_subscription(
 // Cancel subscription
 pub async fn cancel_subscription(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
     req: web::Json<CancelSubscriptionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
 
     // Verify subscription belongs to user
     let subscription = sqlx::query_as::<_, UserSubscription>(
@@ -251,7 +251,7 @@ pub async fn cancel_subscription(
     .bind(req.subscription_id)
     .execute(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
@@ -262,10 +262,10 @@ pub async fn cancel_subscription(
 // Check if user can generate report and track usage
 pub async fn check_and_track_report_usage(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
     contract_address: web::Json<serde_json::Value>,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
     let address = contract_address
         .get("contract_address")
         .and_then(|v| v.as_str())
@@ -284,7 +284,7 @@ pub async fn check_and_track_report_usage(
         .bind(address)
         .execute(pool.get_ref())
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(|e| AppError::DatabaseError(e))?;
 
         return Ok(HttpResponse::Ok().json(serde_json::json!({
             "success": true,
@@ -305,7 +305,7 @@ pub async fn check_and_track_report_usage(
     .bind(user_id)
     .fetch_optional(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     if let Some(sub) = subscription {
         // Check if reports remaining
@@ -323,7 +323,7 @@ pub async fn check_and_track_report_usage(
         .bind(sub.id)
         .execute(pool.get_ref())
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(|e| AppError::DatabaseError(e))?;
 
         // Increment usage counter
         sqlx::query(
@@ -332,7 +332,7 @@ pub async fn check_and_track_report_usage(
         .bind(sub.id)
         .execute(pool.get_ref())
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(|e| AppError::DatabaseError(e))?;
 
         let remaining = sub.reports_limit - sub.reports_used - 1;
         return Ok(HttpResponse::Ok().json(serde_json::json!({
@@ -355,7 +355,7 @@ pub async fn check_and_track_report_usage(
     .bind(user_id)
     .fetch_optional(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     if let Some(payment) = one_time_payment {
         // Track usage
@@ -368,7 +368,7 @@ pub async fn check_and_track_report_usage(
         .bind(payment.id)
         .execute(pool.get_ref())
         .await
-        .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+        .map_err(|e| AppError::DatabaseError(e))?;
 
         return Ok(HttpResponse::Ok().json(serde_json::json!({
             "success": true,
@@ -386,9 +386,9 @@ pub async fn check_and_track_report_usage(
 // Get user's payment history
 pub async fn get_payment_history(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
 
     let transactions = sqlx::query_as::<_, PaymentTransaction>(
         "SELECT * FROM payment_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 50"
@@ -396,7 +396,7 @@ pub async fn get_payment_history(
     .bind(user_id)
     .fetch_all(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
@@ -407,9 +407,9 @@ pub async fn get_payment_history(
 // Get user's report usage history
 pub async fn get_report_history(
     pool: web::Data<SqlitePool>,
-    claims: web::ReqData<Claims>,
+    http_req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
-    let user_id = claims.sub;
+    let user_id = jwt::extract_user_id(&http_req)?;
 
     let reports = sqlx::query_as::<_, ReportUsage>(
         "SELECT * FROM report_usage WHERE user_id = ? ORDER BY created_at DESC LIMIT 100"
@@ -417,7 +417,7 @@ pub async fn get_report_history(
     .bind(user_id)
     .fetch_all(pool.get_ref())
     .await
-    .map_err(|e| AppError::DatabaseError(e.to_string()))?;
+    .map_err(|e| AppError::DatabaseError(e))?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
