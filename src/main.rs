@@ -65,6 +65,14 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("✅ Database ready");
     
+    // Warn about ephemeral storage only on cloud platforms (Render, Heroku, etc.)
+    if config.database_url.contains("/tmp/") && (env::var("RENDER").is_ok() || env::var("DYNO").is_ok()) {
+        log::warn!("⚠️  WARNING: Using ephemeral storage (/tmp) on cloud platform");
+        log::warn!("⚠️  ALL USER DATA WILL BE LOST on restart/redeploy!");
+        log::warn!("⚠️  For production, use PostgreSQL or persistent disk");
+        log::warn!("⚠️  See RENDER_DEPLOYMENT.md for details");
+    }
+    
     let host = config.host.clone();
     let port = config.port;
     

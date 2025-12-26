@@ -50,14 +50,33 @@ Paste the result as your `JWT_SECRET` in Render.
 
 ### Database Storage
 
-⚠️ **SQLite on Render uses `/tmp` which is ephemeral!**
+⚠️ **CRITICAL: SQLite on Render uses `/tmp` which is EPHEMERAL!**
 
 - Database is stored in `/tmp/blocra.db`
-- **Data is lost on each deployment/restart**
-- For production, consider:
-  - Using Render's PostgreSQL add-on
-  - External database service (Supabase, PlanetScale, etc.)
-  - Persistent disk (Render paid plans)
+- **ALL USER DATA IS LOST on each deployment/restart**
+- This is acceptable for:
+  - Development/testing
+  - Demo deployments
+  - Stateless applications
+
+**For Production (User Data Persistence):**
+
+1. **Option 1: Render PostgreSQL (Recommended)**
+   - Add PostgreSQL database in Render Dashboard
+   - Update `DATABASE_URL` to PostgreSQL connection string
+   - Requires code changes to support PostgreSQL
+
+2. **Option 2: Render Persistent Disk (Paid Plans)**
+   - Add persistent disk in Render Dashboard
+   - Mount at `/data`
+   - Set `DATABASE_URL=sqlite:/data/blocra.db`
+   - Data persists across deployments
+
+3. **Option 3: External Database**
+   - Supabase (PostgreSQL)
+   - PlanetScale (MySQL)
+   - Turso (SQLite-compatible)
+   - Set `DATABASE_URL` to external connection string
 
 ### Why /tmp?
 
