@@ -210,21 +210,89 @@ impl RpcService {
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<EventData>, AppError> {
-        let params = json!({
-            "filter": {
-                "from_block": {"block_number": from_block},
-                "to_block": {"block_number": to_block},
-                "address": contract_address,
-                "chunk_size": 1000
-            }
-        });
-
-        let result = self.rpc_call("starknet_getEvents", params).await?;
+        println!("🚀 UNLIMITED MODE: Fetching ALL events for contract: {} from block {} to {}", contract_address, from_block, to_block);
         
-        let events = result.get("events")
-            .and_then(|v| v.as_array())
-            .ok_or(AppError::BadRequest("Invalid events response".to_string()))?;
+        let mut all_events = Vec::new();
+        let mut continuation_token: Option<String> = None;
+        let mut page_count = 0;
+        let max_pages = 100; // Safety limit
 
+        loop {
+            page_count += 1;
+            println!("📄 Fetching page {}...", page_count);
+
+            let mut params = json!({
+                "filter": {
+                    "from_block": {"block_number": from_block},
+                    "to_block": {"block_number": to_block},
+                    "address": contract_address,
+                    "chunk_size": 1000
+                }
+            });
+
+            // Add continuation token if we have one
+            if let Some(token) = &continuation_token {
+                params["filter"]["continuation_token"] = json!(token);
+            }
+
+            let result = self.rpc_call("starknet_getEvents", params).await?;
+            
+            let events = result.get("events")
+                .and_then(|v| v.as_array())
+                .ok_or(AppError::BadRequest("Invalid events response".to_string()))?;
+
+            println!("   ✅ Page {}: {} events (Total: {})", page_count, events.len(), all_events.len() + events.len());
+
+            // Check for continuation token
+            continuation_token = result.get("continuation_token")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Process events from this page
+            for event in events {
+                let block_number = event.get("block_number")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                
+                let tx_hash = event.get("transaction_hash")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let keys: Vec<String> = event.get("keys")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|k| k.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                let data: Vec<String> = event.get("data")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|d| d.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                // Decode event
+                let (event_name, decoded_data) = self.decode_event(&keys, &data);
+
+                // We'll estimate timestamp later in batch
+                all_events.push((block_number, tx_hash, keys, data, event_name, decoded_data));
+            }
+
+            // Check if we should continue
+            if continuation_token.is_none() {
+                println!("   ✅ No more pages. Pagination complete!");
+                break;
+            }
+
+            if page_count >= max_pages {
+                println!("   ⚠️ Reached maximum page limit ({}). Stopping pagination.", max_pages);
+                break;
+            }
+
+            println!("   🔄 More events available, fetching next page...");
+        }
+
+        println!("🎉 COMPLETE! Fetched {} total events across {} pages", all_events.len(), page_count);
+
+        // Now fetch timestamps for interpolation
         let latest_block = self.get_block_with_txs(to_block).await?;
         let from_block_data = self.get_block_with_txs(from_block).await?;
         
@@ -233,31 +301,8 @@ impl RpcService {
         let total_diff = to_block.saturating_sub(from_block);
         let time_diff = latest_timestamp.saturating_sub(from_timestamp);
 
-        let mut decoded_events = Vec::new();
-
-        for event in events {
-            let block_number = event.get("block_number")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            
-            let tx_hash = event.get("transaction_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let keys: Vec<String> = event.get("keys")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|k| k.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-
-            let data: Vec<String> = event.get("data")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|d| d.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-
-            // Decode event
-            let (event_name, decoded_data) = self.decode_event(&keys, &data);
-
+        // Convert to EventData with timestamps
+        let decoded_events: Vec<EventData> = all_events.into_iter().map(|(block_number, tx_hash, keys, data, event_name, decoded_data)| {
             // Estimate timestamp
             let block_diff = to_block.saturating_sub(block_number);
             let estimated_timestamp = if total_diff > 0 {
@@ -266,7 +311,7 @@ impl RpcService {
                 latest_timestamp
             };
 
-            decoded_events.push(EventData {
+            EventData {
                 block_number,
                 transaction_hash: tx_hash,
                 keys,
@@ -277,8 +322,8 @@ impl RpcService {
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_default(),
                 timestamp_raw: estimated_timestamp,
-            });
-        }
+            }
+        }).collect();
 
         Ok(decoded_events)
     }
@@ -339,8 +384,11 @@ impl RpcService {
             current_block
         };
 
-        let search_blocks = (to_block - from_block + 1).min(20000);
+        // UNLIMITED MODE: No artificial limits - search the entire range requested
+        let search_blocks = to_block - from_block + 1;
         let mut contract_transactions = Vec::new();
+        
+        println!("🔍 Analyzing {} blocks for contract transactions", search_blocks);
 
         for i in 0..search_blocks {
             let block_num = to_block - i;

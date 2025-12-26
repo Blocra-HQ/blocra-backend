@@ -54,7 +54,8 @@ pub async fn get_contract_events(rpc: &RpcService, payload: Value) -> Result<Val
     let from_block = if let Some(ts) = from_date {
         rpc.find_block_by_timestamp(ts).await?
     } else {
-        latest.saturating_sub(2000)
+        // UNLIMITED MODE: Start from block 0 (genesis) for complete historical analysis
+        0
     };
 
     let to_block = if let Some(ts) = to_date {
@@ -63,7 +64,11 @@ pub async fn get_contract_events(rpc: &RpcService, payload: Value) -> Result<Val
         latest
     };
 
+    println!("🚀 UNLIMITED MODE: Fetching events from block {} to {} ({} blocks)", from_block, to_block, to_block - from_block);
+
     let events = rpc.get_events(contract_address, from_block, to_block).await?;
+    
+    println!("✅ Fetched {} events", events.len());
 
     Ok(json!({
         "success": true,
