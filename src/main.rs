@@ -19,6 +19,18 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
 
     let config = config::Config::from_env();
+    
+    // Log configuration for debugging
+    log::info!("Starting BlocRA Backend");
+    log::info!("Database URL: {}", config.database_url);
+    log::info!("Host: {}", config.host);
+    log::info!("Port: {}", config.port);
+    
+    // Check if running on Render
+    if env::var("RENDER").is_ok() {
+        log::info!("Running on Render platform");
+    }
+    
     let db_pool = db::init_pool(&config.database_url)
         .await
         .expect("Failed to create database pool");
