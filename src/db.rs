@@ -1,4 +1,5 @@
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use std::path::Path;
 
 pub type DbPool = SqlitePool;
 
@@ -6,32 +7,41 @@ pub async fn init_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
     // Extract the file path from the database URL
     let db_path = database_url.strip_prefix("sqlite:").unwrap_or(database_url);
     
-    // Create parent directory if it doesn't exist
-    if let Some(parent) = std::path::Path::new(db_path).parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            log::warn!("Could not create database directory: {}", e);
+    log::info!("Initializing database at: {}", db_path);
+    
+    // Ensure /tmp directory exists (it should always exist on Unix systems)
+    if db_path.starts_with("/tmp") {
+        log::info!("Using /tmp directory for database (cloud deployment)");
+        // /tmp always exists on Unix, but let's verify
+        if !Path::new("/tmp").exists() {
+            log::error!("/tmp directory does not exist!");
+            return Err(sqlx::Error::Configuration(
+                "/tmp directory not found".into()
+            ));
         }
-    }
-    
-    // Log the database path for debugging
-    log::info!("Connecting to database at: {}", db_path);
-    
-    // Check if we can write to the directory
-    if let Some(parent) = std::path::Path::new(db_path).parent() {
-        match std::fs::metadata(parent) {
-            Ok(metadata) => {
-                log::info!("Database directory exists, readonly: {}", metadata.permissions().readonly());
-            }
-            Err(e) => {
-                log::warn!("Cannot access database directory: {}", e);
+    } else {
+        // For local development, create the data directory
+        if let Some(parent) = Path::new(db_path).parent() {
+            if !parent.exists() {
+                log::info!("Creating database directory: {:?}", parent);
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| sqlx::Error::Configuration(
+                        format!("Failed to create database directory: {}", e).into()
+                    ))?;
             }
         }
     }
 
-    SqlitePoolOptions::new()
+    log::info!("Connecting to SQLite database...");
+    
+    let pool = SqlitePoolOptions::new()
         .max_connections(10)
         .connect(database_url)
-        .await
+        .await?;
+    
+    log::info!("✅ Database connection established");
+    
+    Ok(pool)
 }
 
 pub async fn run_migrations(pool: &DbPool) -> Result<(), sqlx::Error> {

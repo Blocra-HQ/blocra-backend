@@ -25,12 +25,9 @@ impl Config {
                 .expect("PORT must be a number"),
             database_url: env::var("DATABASE_URL")
                 .unwrap_or_else(|_| {
-                    // Use /tmp for writable storage on platforms like Render
-                    if env::var("RENDER").is_ok() {
-                        "sqlite:/tmp/blocra.db".to_string()
-                    } else {
-                        "sqlite:./data/blocra.db".to_string()
-                    }
+                    // Always use /tmp for cloud deployments (Render, Railway, etc.)
+                    // /tmp is the only writable directory on most cloud platforms
+                    "sqlite:/tmp/blocra.db".to_string()
                 }),
             jwt_secret: env::var("JWT_SECRET")
                 .unwrap_or_else(|_| {

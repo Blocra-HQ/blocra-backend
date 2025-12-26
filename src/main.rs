@@ -21,31 +21,54 @@ async fn main() -> std::io::Result<()> {
     let config = config::Config::from_env();
     
     // Log configuration for debugging
-    log::info!("Starting BlocRA Backend");
-    log::info!("Database URL: {}", config.database_url);
-    log::info!("Host: {}", config.host);
-    log::info!("Port: {}", config.port);
+    log::info!("🚀 Starting BlocRA Backend");
+    log::info!("📊 Configuration:");
+    log::info!("  - Database URL: {}", config.database_url);
+    log::info!("  - Host: {}", config.host);
+    log::info!("  - Port: {}", config.port);
+    log::info!("  - CORS Origin: {}", config.cors_origin);
     
-    // Check if running on Render
+    // Check environment
     if env::var("RENDER").is_ok() {
-        log::info!("Running on Render platform");
+        log::info!("🌐 Running on Render platform");
     }
     
-    let db_pool = db::init_pool(&config.database_url)
-        .await
-        .expect("Failed to create database pool");
+    // Check /tmp directory
+    if std::path::Path::new("/tmp").exists() {
+        log::info!("✅ /tmp directory exists and is accessible");
+    } else {
+        log::error!("❌ /tmp directory does not exist!");
+    }
+    
+    log::info!("🔌 Initializing database connection...");
+    let db_pool = match db::init_pool(&config.database_url).await {
+        Ok(pool) => {
+            log::info!("✅ Database pool created successfully");
+            pool
+        }
+        Err(e) => {
+            log::error!("❌ Failed to create database pool: {:?}", e);
+            log::error!("Database URL was: {}", config.database_url);
+            panic!("Failed to create database pool: {:?}", e);
+        }
+    };
 
     // Run migrations
-    db::run_migrations(&db_pool)
-        .await
-        .expect("Failed to run migrations");
+    log::info!("🔄 Running database migrations...");
+    match db::run_migrations(&db_pool).await {
+        Ok(_) => log::info!("✅ Migrations completed successfully"),
+        Err(e) => {
+            log::error!("❌ Failed to run migrations: {:?}", e);
+            panic!("Failed to run migrations: {:?}", e);
+        }
+    }
 
-    log::info!("✅ Connected to SQLite database");
+    log::info!("✅ Database ready");
     
     let host = config.host.clone();
     let port = config.port;
     
-    log::info!("🚀 Starting server on {}:{}", host, port);
+    log::info!("🚀 Starting HTTP server on {}:{}", host, port);
 
     HttpServer::new(move || {
         let cors_origin = env::var("CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
