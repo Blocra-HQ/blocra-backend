@@ -1,6 +1,7 @@
 use crate::{db::DbPool, models::user::*, utils::jwt, errors::AppError};
 use actix_web::HttpRequest;
 use serde::{Deserialize, Serialize};
+use bcrypt::{hash, verify, DEFAULT_COST};
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -64,12 +65,24 @@ pub async fn register(
         return Err(AppError::BadRequest("User already exists".to_string()));
     }
 
+    // Hash password if provided
+    let password_hash = if let Some(password) = payload.password {
+        if password.len() < 6 {
+            return Err(AppError::BadRequest("Password must be at least 6 characters".to_string()));
+        }
+        Some(hash(password, DEFAULT_COST)
+            .map_err(|e| AppError::BadRequest(format!("Failed to hash password: {}", e)))?)
+    } else {
+        None
+    };
+
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (email, username, role) VALUES (?, ?, 'user')
+        "INSERT INTO users (email, username, password_hash, role) VALUES (?, ?, ?, 'user')
          RETURNING *"
     )
     .bind(&payload.email)
     .bind(payload.username)
+    .bind(password_hash)
     .fetch_one(pool)
     .await?;
 
@@ -94,8 +107,18 @@ pub async fn login(
     .await
     .map_err(|_| AppError::Unauthorized("Invalid credentials".to_string()))?;
 
-    // TODO: Verify password with bcrypt
-    // For now, just return token
+    // Verify password
+    if let Some(password_hash) = &user.password_hash {
+        let valid = verify(&payload.password, password_hash)
+            .map_err(|_| AppError::Unauthorized("Invalid credentials".to_string()))?;
+        
+        if !valid {
+            return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+        }
+    } else {
+        // Allow login without password for OAuth-only accounts
+        log::warn!("User {} has no password set, allowing login", user.id);
+    }
 
     let token = jwt::create_token(user.id)?;
 

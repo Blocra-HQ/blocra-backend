@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use crate::errors::AppError;
 
 // RPC endpoints for Starknet
@@ -88,7 +89,11 @@ pub struct RpcService {
 impl RpcService {
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(Duration::from_secs(30))  // Mobile-friendly timeout
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 
@@ -102,8 +107,12 @@ impl RpcService {
     }
 
     pub async fn rpc_call(&self, method: &str, params: Value) -> Result<Value, AppError> {
-        for _ in 0..RPC_ENDPOINTS.len() {
+        let mut last_error = None;
+        
+        for attempt in 0..RPC_ENDPOINTS.len() {
             let url = self.get_rpc_url();
+            
+            log::info!("RPC call attempt {} to {}: {}", attempt + 1, url, method);
             
             let request = RpcRequest {
                 jsonrpc: "2.0".to_string(),
@@ -118,20 +127,36 @@ impl RpcService {
                 .await
             {
                 Ok(response) => {
-                    if let Ok(rpc_response) = response.json::<RpcResponse>().await {
-                        if let Some(result) = rpc_response.result {
-                            return Ok(result);
+                    if response.status().is_success() {
+                        if let Ok(rpc_response) = response.json::<RpcResponse>().await {
+                            if let Some(result) = rpc_response.result {
+                                log::info!("RPC call successful on attempt {}", attempt + 1);
+                                return Ok(result);
+                            }
+                            if let Some(error) = rpc_response.error {
+                                log::warn!("RPC error: {} - {}", error.code, error.message);
+                                last_error = Some(format!("RPC error: {}", error.message));
+                            }
                         }
+                    } else {
+                        log::warn!("RPC HTTP error: {}", response.status());
+                        last_error = Some(format!("HTTP {}", response.status()));
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    log::warn!("RPC request failed: {}", e);
+                    last_error = Some(e.to_string());
                     self.switch_rpc();
                     continue;
                 }
             }
+            
+            self.switch_rpc();
         }
 
-        Err(AppError::BadRequest("All RPC endpoints failed".to_string()))
+        Err(AppError::BadRequest(
+            last_error.unwrap_or_else(|| "All RPC endpoints failed".to_string())
+        ))
     }
 
     pub async fn get_block_number(&self) -> Result<u64, AppError> {

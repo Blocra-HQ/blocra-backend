@@ -8,6 +8,7 @@ pub struct User {
     pub wallet_address: Option<String>,
     pub email: Option<String>,
     pub username: Option<String>,
+    pub password_hash: Option<String>,
     pub role: String,
     pub google_id: Option<String>,
     pub profile_picture: Option<String>,
