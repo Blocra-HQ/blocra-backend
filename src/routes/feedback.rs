@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse};
-use crate::handlers::feedback;
+use crate::handlers::feedback::{self, FeedbackPayload};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -9,7 +9,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 async fn submit_feedback(
-    payload: web::Json<feedback::FeedbackPayload>,
+    payload: web::Json<FeedbackPayload>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let response = feedback::submit_feedback(payload).await?;
     Ok(HttpResponse::Ok().json(response))

@@ -48,3 +48,10 @@ thiserror = "2.0"
 # Async utilities
 futures = "0.3"
 futures-util = "0.3"
+
+# Email (optional)
+lettre = { version = "0.11", optional = true }
+
+[features]
+default = []
+email = ["lettre"]

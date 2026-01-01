@@ -275,7 +275,7 @@ pub async fn refresh_token(
     let claims = jwt::verify_token(&payload.refresh_token)?;
     
     // Check if token is expired
-    let now = chrono::Utc::now().timestamp() as usize;
+    let now = chrono::Utc::now().timestamp();
     if claims.exp < now {
         return Err(AppError::Unauthorized("Refresh token expired".to_string()));
     }

@@ -12,6 +12,7 @@ use actix_web::{web, App, HttpServer, middleware::Logger};
 use actix_cors::Cors;
 use dotenv::dotenv;
 use std::env;
+use services::alchemy::AlchemyService;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -65,6 +66,12 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("✅ Database ready");
     
+    // Initialize Alchemy service
+    let alchemy_api_key = env::var("ALCHEMY_API_KEY")
+        .unwrap_or_else(|_| "GdgtvCyIue4W16Uw7yg8p".to_string());
+    let alchemy_service = AlchemyService::new(alchemy_api_key);
+    log::info!("✅ Alchemy service initialized");
+    
     // Warn about ephemeral storage only on cloud platforms (Render, Heroku, etc.)
     if config.database_url.contains("/tmp/") && (env::var("RENDER").is_ok() || env::var("DYNO").is_ok()) {
         log::warn!("⚠️  WARNING: Using ephemeral storage (/tmp) on cloud platform");
@@ -105,6 +112,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(config.clone()))
+            .app_data(web::Data::new(alchemy_service.clone()))
             .wrap(cors)
             .wrap(Logger::default())
             .wrap(middleware::rate_limit::RateLimitMiddleware)

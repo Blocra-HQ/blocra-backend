@@ -3,6 +3,7 @@ use actix_web::HttpRequest;
 use serde::{Deserialize, Serialize};
 use crate::utils::jwt;
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct ActivityQuery {
     pub user_id: Option<i64>,
@@ -350,6 +351,7 @@ pub async fn get_query_logs(
 }
 
 // Log query execution (called by query handler)
+#[allow(dead_code)]
 pub async fn log_query_execution(
     pool: &DbPool,
     user_id: i64,
@@ -381,6 +383,7 @@ pub async fn log_query_execution(
 }
 
 // Log report generation
+#[allow(dead_code)]
 pub async fn log_report_generation(
     pool: &DbPool,
     user_id: i64,

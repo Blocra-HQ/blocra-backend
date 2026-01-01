@@ -28,6 +28,7 @@ pub struct QueryLog {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ReportLog {
     pub id: i64,
