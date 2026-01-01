@@ -7,18 +7,20 @@ mod contract;
 mod dashboard;
 mod query;
 mod health;
-mod payment;
+mod feedback;
+mod dashboard_builder;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
             .configure(health::configure)
             .configure(auth::configure)
-            .configure(bounty::configure)
             .configure(admin::configure)
+            .configure(bounty::configure)
             .configure(contract::configure)
             .configure(dashboard::configure)
             .configure(query::configure)
-            .configure(payment::configure)
+            .configure(feedback::configure)
+            .configure(dashboard_builder::configure)
     );
 }

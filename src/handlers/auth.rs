@@ -1,5 +1,8 @@
 use crate::{db::DbPool, models::user::*, utils::jwt, errors::AppError};
 use actix_web::HttpRequest;
+use actix_multipart::Multipart;
+use futures_util::StreamExt;
+use std::io::Write;
 use serde::{Deserialize, Serialize};
 use bcrypt::{hash, verify, DEFAULT_COST};
 
@@ -216,6 +219,64 @@ pub async fn get_current_user(
     .await?;
 
     Ok(user.into())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImageUploadResponse {
+    pub success: bool,
+    pub profile_picture: String,
+}
+
+pub async fn upload_profile_image(
+    pool: &DbPool,
+    req: &HttpRequest,
+    mut payload: Multipart,
+) -> Result<ImageUploadResponse, AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    
+    // Create uploads directory if it doesn't exist
+    std::fs::create_dir_all("uploads/profiles")
+        .map_err(|e| AppError::BadRequest(format!("Failed to create upload directory: {}", e)))?;
+
+    let mut file_path = String::new();
+
+    // Process multipart data
+    while let Some(item) = payload.next().await {
+        let mut field = item.map_err(|e| AppError::BadRequest(format!("Failed to read field: {}", e)))?;
+        
+        // Generate unique filename
+        let filename = format!("profile_{}_{}.jpg", user_id, chrono::Utc::now().timestamp());
+        file_path = format!("uploads/profiles/{}", filename);
+        
+        // Save file
+        let mut file = std::fs::File::create(&file_path)
+            .map_err(|e| AppError::BadRequest(format!("Failed to create file: {}", e)))?;
+
+        while let Some(chunk) = field.next().await {
+            let data = chunk.map_err(|e| AppError::BadRequest(format!("Failed to read chunk: {}", e)))?;
+            file.write_all(&data)
+                .map_err(|e| AppError::BadRequest(format!("Failed to write file: {}", e)))?;
+        }
+    }
+
+    if file_path.is_empty() {
+        return Err(AppError::BadRequest("No file uploaded".to_string()));
+    }
+
+    // Update user profile picture in database
+    let profile_picture_url = format!("/{}", file_path);
+    sqlx::query(
+        "UPDATE users SET profile_picture = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+    )
+    .bind(&profile_picture_url)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(ImageUploadResponse {
+        success: true,
+        profile_picture: profile_picture_url,
+    })
 }
 
 pub async fn update_profile(

@@ -1,4 +1,5 @@
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Responder, HttpRequest};
+use actix_multipart::Multipart;
 use crate::{handlers::auth as auth_handler, db::DbPool};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -12,6 +13,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/me", web::get().to(get_current_user))
             .route("/profile", web::get().to(get_profile))
             .route("/profile", web::put().to(update_profile))
+            .route("/upload-profile-image", web::post().to(upload_profile_image))
             .route("/logout", web::post().to(logout))
             .route("/oauth/config", web::get().to(get_oauth_config))
     );
@@ -148,4 +150,18 @@ async fn get_oauth_config() -> impl Responder {
             }
         }
     }))
+}
+
+async fn upload_profile_image(
+    pool: web::Data<DbPool>,
+    req: HttpRequest,
+    payload: Multipart,
+) -> impl Responder {
+    match auth_handler::upload_profile_image(&pool, &req, payload).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
+            "success": false,
+            "message": e.to_string()
+        }))
+    }
 }

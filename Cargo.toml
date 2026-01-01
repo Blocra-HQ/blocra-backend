@@ -9,6 +9,7 @@ actix-web = "4.9"
 actix-cors = "0.7"
 actix-files = "0.6"
 actix-rt = "2.10"
+actix-multipart = "0.7"
 
 # WebSocket support
 actix-ws = "0.3"
@@ -46,3 +47,4 @@ thiserror = "2.0"
 
 # Async utilities
 futures = "0.3"
+futures-util = "0.3"
