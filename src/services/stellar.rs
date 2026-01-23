@@ -64,6 +64,7 @@ pub struct LedgerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payment {
     pub id: String,
+    pub paging_token: String,
     pub transaction_hash: String,
     pub source_account: String,
     pub destination: String,
