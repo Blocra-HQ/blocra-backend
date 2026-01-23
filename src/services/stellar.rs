@@ -133,6 +133,29 @@ pub struct EmbeddedRecords<T> {
     pub records: Vec<T>,
 }
 
+// I'm adding structs for getLedgers RPC method as required by issue #2
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpcLedger {
+    pub hash: String,
+    pub sequence: u64,
+    #[serde(rename = "ledgerCloseTime")]
+    pub ledger_close_time: String,
+    #[serde(rename = "headerXdr")]
+    pub header_xdr: Option<String>,
+    #[serde(rename = "metadataXdr")]
+    pub metadata_xdr: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GetLedgersResult {
+    pub ledgers: Vec<RpcLedger>,
+    #[serde(rename = "latestLedger")]
+    pub latest_ledger: u64,
+    #[serde(rename = "oldestLedger")]
+    pub oldest_ledger: u64,
+    pub cursor: Option<String>,
+}
+
 // ============================================================================
 // Implementation
 // ============================================================================
@@ -234,7 +257,58 @@ impl StellarRpcClient {
         Ok(ledger)
     }
 
+    /// I'm fetching ledgers via RPC getLedgers for sequential ingestion (issue #2)
+    pub async fn fetch_ledgers(
+        &self,
+        start_ledger: Option<u64>,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<GetLedgersResult> {
+        if self.mock_mode {
+            return Ok(Self::mock_get_ledgers(start_ledger.unwrap_or(1000), limit));
+        }
+
+        info!("Fetching ledgers via RPC getLedgers");
+
+        let mut params = serde_json::Map::new();
+        params.insert("pagination".to_string(), json!({ "limit": limit }));
+        
+        // I must use either startLedger or cursor, not both
+        if let Some(c) = cursor {
+            params.get_mut("pagination").unwrap().as_object_mut().unwrap()
+                .insert("cursor".to_string(), json!(c));
+        } else if let Some(start) = start_ledger {
+            params.insert("startLedger".to_string(), json!(start));
+        }
+
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "method": "getLedgers",
+            "id": 1,
+            "params": params
+        });
+
+        let response = self
+            .retry_request(|| async {
+                self.client.post(&self.rpc_url).json(&payload).send().await
+            })
+            .await
+            .context("Failed to fetch ledgers")?;
+
+        let json_response: JsonRpcResponse<GetLedgersResult> = response
+            .json()
+            .await
+            .context("Failed to parse getLedgers response")?;
+
+        if let Some(error) = json_response.error {
+            anyhow::bail!("RPC error: {} (code: {})", error.message, error.code);
+        }
+
+        json_response.result.context("No result in getLedgers response")
+    }
+
     /// Fetch recent payments
+
     pub async fn fetch_payments(&self, limit: u32, cursor: Option<&str>) -> Result<Vec<Payment>> {
         if self.mock_mode {
             return Ok(Self::mock_payments(limit));
@@ -493,6 +567,25 @@ impl StellarRpcClient {
             fee_pool: "3145678.9012345".to_string(),
             base_fee: 100,
             base_reserve: "0.5".to_string(),
+        }
+    }
+
+    // I'm mocking getLedgers response for testing
+    fn mock_get_ledgers(start: u64, limit: u32) -> GetLedgersResult {
+        let ledgers = (0..limit)
+            .map(|i| RpcLedger {
+                hash: format!("hash_{}", start + i as u64),
+                sequence: start + i as u64,
+                ledger_close_time: format!("{}", 1734032457 + i as u64 * 5),
+                header_xdr: Some("mock_header".to_string()),
+                metadata_xdr: Some("mock_metadata".to_string()),
+            })
+            .collect();
+        GetLedgersResult {
+            ledgers,
+            latest_ledger: start + limit as u64 + 100,
+            oldest_ledger: start.saturating_sub(1000),
+            cursor: Some(format!("{}", start + limit as u64 - 1)),
         }
     }
 
