@@ -206,13 +206,7 @@ impl StellarRpcClient {
         });
 
         let response = self
-            .retry_request(|| async {
-                self.client
-                    .post(&self.rpc_url)
-                    .json(&payload)
-                    .send()
-                    .await
-            })
+            .retry_request(|| async { self.client.post(&self.rpc_url).json(&payload).send().await })
             .await
             .context("Failed to check RPC health")?;
 
@@ -225,9 +219,7 @@ impl StellarRpcClient {
             anyhow::bail!("RPC error: {} (code: {})", error.message, error.code);
         }
 
-        json_response
-            .result
-            .context("No result in health response")
+        json_response.result.context("No result in health response")
     }
 
     /// Fetch latest ledger information
@@ -273,10 +265,14 @@ impl StellarRpcClient {
 
         let mut params = serde_json::Map::new();
         params.insert("pagination".to_string(), json!({ "limit": limit }));
-        
+
         // I must use either startLedger or cursor, not both
         if let Some(c) = cursor {
-            params.get_mut("pagination").unwrap().as_object_mut().unwrap()
+            params
+                .get_mut("pagination")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
                 .insert("cursor".to_string(), json!(c));
         } else if let Some(start) = start_ledger {
             params.insert("startLedger".to_string(), json!(start));
@@ -290,9 +286,7 @@ impl StellarRpcClient {
         });
 
         let response = self
-            .retry_request(|| async {
-                self.client.post(&self.rpc_url).json(&payload).send().await
-            })
+            .retry_request(|| async { self.client.post(&self.rpc_url).json(&payload).send().await })
             .await
             .context("Failed to fetch ledgers")?;
 
@@ -305,7 +299,9 @@ impl StellarRpcClient {
             anyhow::bail!("RPC error: {} (code: {})", error.message, error.code);
         }
 
-        json_response.result.context("No result in getLedgers response")
+        json_response
+            .result
+            .context("No result in getLedgers response")
     }
 
     /// Fetch recent payments
@@ -317,10 +313,7 @@ impl StellarRpcClient {
 
         info!("Fetching {} payments from Horizon API", limit);
 
-        let mut url = format!(
-            "{}/payments?order=desc&limit={}",
-            self.horizon_url, limit
-        );
+        let mut url = format!("{}/payments?order=desc&limit={}", self.horizon_url, limit);
 
         if let Some(cursor) = cursor {
             url.push_str(&format!("&cursor={}", cursor));
@@ -480,11 +473,11 @@ impl StellarRpcClient {
 
         loop {
             let start_time = Instant::now();
-            
+
             match request_fn().await {
                 Ok(response) => {
                     let elapsed = start_time.elapsed().as_millis();
-                    
+
                     if response.status().is_success() {
                         debug!("Request succeeded in {} ms", elapsed);
                         return Ok(response);
@@ -494,7 +487,7 @@ impl StellarRpcClient {
                             .text()
                             .await
                             .unwrap_or_else(|_| "Unknown error".to_string());
-                        
+
                         warn!(
                             "Request failed with status {} in {} ms: {}",
                             status, elapsed, error_text
@@ -521,16 +514,14 @@ impl StellarRpcClient {
                     );
 
                     if attempt >= MAX_RETRIES {
-                        return Err(err).context(format!(
-                            "Request failed after {} retries",
-                            MAX_RETRIES
-                        ));
+                        return Err(err)
+                            .context(format!("Request failed after {} retries", MAX_RETRIES));
                     }
                 }
             }
 
             attempt += 1;
-            
+
             info!(
                 "Retrying request in {} ms (attempt {}/{})",
                 backoff_ms,
@@ -596,7 +587,10 @@ impl StellarRpcClient {
                 id: format!("payment_{}", i),
                 paging_token: format!("paging_{}", i),
                 transaction_hash: format!("txhash_{}", i),
-                source_account: format!("GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}", i),
+                source_account: format!(
+                    "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}",
+                    i
+                ),
                 destination: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i),
                 asset_type: if i % 3 == 0 {
                     "native".to_string()
@@ -629,7 +623,10 @@ impl StellarRpcClient {
                 base_asset_type: "native".to_string(),
                 base_asset_code: None,
                 base_asset_issuer: None,
-                counter_account: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i),
+                counter_account: format!(
+                    "GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}",
+                    i
+                ),
                 counter_amount: format!("{}.0000000", 500 + i * 50),
                 counter_asset_type: "credit_alphanum4".to_string(),
                 counter_asset_code: Some("USDC".to_string()),
@@ -703,7 +700,7 @@ mod tests {
     async fn test_mock_health_check() {
         let client = StellarRpcClient::new_with_defaults(true);
         let health = client.check_health().await.unwrap();
-        
+
         assert_eq!(health.status, "healthy");
         assert!(health.latest_ledger > 0);
     }
@@ -712,7 +709,7 @@ mod tests {
     async fn test_mock_fetch_ledger() {
         let client = StellarRpcClient::new_with_defaults(true);
         let ledger = client.fetch_latest_ledger().await.unwrap();
-        
+
         assert!(ledger.sequence > 0);
         assert!(!ledger.hash.is_empty());
     }
@@ -721,7 +718,7 @@ mod tests {
     async fn test_mock_fetch_payments() {
         let client = StellarRpcClient::new_with_defaults(true);
         let payments = client.fetch_payments(5, None).await.unwrap();
-        
+
         assert_eq!(payments.len(), 5);
         assert!(!payments[0].id.is_empty());
     }
@@ -730,7 +727,7 @@ mod tests {
     async fn test_mock_fetch_trades() {
         let client = StellarRpcClient::new_with_defaults(true);
         let trades = client.fetch_trades(3, None).await.unwrap();
-        
+
         assert_eq!(trades.len(), 3);
         assert!(!trades[0].id.is_empty());
     }
@@ -738,21 +735,24 @@ mod tests {
     #[tokio::test]
     async fn test_mock_fetch_order_book() {
         let client = StellarRpcClient::new_with_defaults(true);
-        
+
         let selling = Asset {
             asset_type: "native".to_string(),
             asset_code: None,
             asset_issuer: None,
         };
-        
+
         let buying = Asset {
             asset_type: "credit_alphanum4".to_string(),
             asset_code: Some("USDC".to_string()),
             asset_issuer: Some("GBXXXXXXX".to_string()),
         };
-        
-        let order_book = client.fetch_order_book(&selling, &buying, 10).await.unwrap();
-        
+
+        let order_book = client
+            .fetch_order_book(&selling, &buying, 10)
+            .await
+            .unwrap();
+
         assert!(!order_book.bids.is_empty());
         assert!(!order_book.asks.is_empty());
     }
