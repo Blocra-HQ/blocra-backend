@@ -594,6 +594,7 @@ impl StellarRpcClient {
         (0..limit)
             .map(|i| Payment {
                 id: format!("payment_{}", i),
+                paging_token: format!("paging_{}", i),
                 transaction_hash: format!("txhash_{}", i),
                 source_account: format!("GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}", i),
                 destination: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i),
