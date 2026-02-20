@@ -199,7 +199,7 @@ pub struct GetLedgersResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizonPoolReserve {
-    pub asset: String,  // "native" or "CODE:ISSUER"
+    pub asset: String, // "native" or "CODE:ISSUER"
     pub amount: String,
 }
 
@@ -468,7 +468,10 @@ impl StellarRpcClient {
             return Ok(Self::mock_payments(5));
         }
 
-        let url = format!("{}/ledgers/{}/payments?limit=200", self.horizon_url, sequence);
+        let url = format!(
+            "{}/ledgers/{}/payments?limit=200",
+            self.horizon_url, sequence
+        );
 
         let response = self
             .retry_request(|| async { self.client.get(&url).send().await })
@@ -487,12 +490,18 @@ impl StellarRpcClient {
     }
 
     /// Fetch transactions for a specific ledger
-    pub async fn fetch_transactions_for_ledger(&self, sequence: u64) -> Result<Vec<HorizonTransaction>> {
+    pub async fn fetch_transactions_for_ledger(
+        &self,
+        sequence: u64,
+    ) -> Result<Vec<HorizonTransaction>> {
         if self.mock_mode {
             return Ok(Self::mock_transactions(5));
         }
 
-        let url = format!("{}/ledgers/{}/transactions?limit=200&include_failed=true", self.horizon_url, sequence);
+        let url = format!(
+            "{}/ledgers/{}/transactions?limit=200&include_failed=true",
+            self.horizon_url, sequence
+        );
 
         let response = self
             .retry_request(|| async { self.client.get(&url).send().await })
@@ -900,16 +909,15 @@ impl StellarRpcClient {
     }
 
     /// Fetch trades for a specific liquidity pool
-    pub async fn fetch_pool_trades(
-        &self,
-        pool_id: &str,
-        limit: u32,
-    ) -> Result<Vec<Trade>> {
+    pub async fn fetch_pool_trades(&self, pool_id: &str, limit: u32) -> Result<Vec<Trade>> {
         if self.mock_mode {
             return Ok(Self::mock_trades(limit));
         }
 
-        info!("Fetching {} trades for pool {} from Horizon API", limit, pool_id);
+        info!(
+            "Fetching {} trades for pool {} from Horizon API",
+            limit, pool_id
+        );
 
         let url = format!(
             "{}/liquidity_pools/{}/trades?order=desc&limit={}",
@@ -938,44 +946,91 @@ impl StellarRpcClient {
 
     fn mock_liquidity_pools(limit: u32) -> Vec<HorizonLiquidityPool> {
         let pool_configs = vec![
-            ("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "XLM", "", "500000.0", "1200000.0", "850000.0"),
-            ("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "EURC", "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y36DAVIZA67CE7BKBHP4V2OA", "320000.0", "295000.0", "610000.0"),
-            ("XLM", "", "BTC", "GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDEMNQERFT", "450000.0", "12.5", "750000.0"),
-            ("USDC", "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "yUSDC", "GDGTVWSM4MGS2T7Z7GVZE5SAEVLSWM5SGY5Q2EMUQWRMEV2RNYY3YFG6", "180000.0", "179500.0", "360000.0"),
-            ("XLM", "", "AQUA", "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA", "800000.0", "5000000.0", "420000.0"),
+            (
+                "USDC",
+                "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+                "XLM",
+                "",
+                "500000.0",
+                "1200000.0",
+                "850000.0",
+            ),
+            (
+                "USDC",
+                "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+                "EURC",
+                "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y36DAVIZA67CE7BKBHP4V2OA",
+                "320000.0",
+                "295000.0",
+                "610000.0",
+            ),
+            (
+                "XLM",
+                "",
+                "BTC",
+                "GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDEMNQERFT",
+                "450000.0",
+                "12.5",
+                "750000.0",
+            ),
+            (
+                "USDC",
+                "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+                "yUSDC",
+                "GDGTVWSM4MGS2T7Z7GVZE5SAEVLSWM5SGY5Q2EMUQWRMEV2RNYY3YFG6",
+                "180000.0",
+                "179500.0",
+                "360000.0",
+            ),
+            (
+                "XLM",
+                "",
+                "AQUA",
+                "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+                "800000.0",
+                "5000000.0",
+                "420000.0",
+            ),
         ];
 
-        pool_configs.iter().take(limit as usize).enumerate().map(|(i, (code_a, issuer_a, code_b, issuer_b, amt_a, amt_b, shares))| {
-            let asset_a = if issuer_a.is_empty() {
-                "native".to_string()
-            } else {
-                format!("{}:{}", code_a, issuer_a)
-            };
-            let asset_b = if issuer_b.is_empty() {
-                "native".to_string()
-            } else {
-                format!("{}:{}", code_b, issuer_b)
-            };
+        pool_configs
+            .iter()
+            .take(limit as usize)
+            .enumerate()
+            .map(
+                |(i, (code_a, issuer_a, code_b, issuer_b, amt_a, amt_b, shares))| {
+                    let asset_a = if issuer_a.is_empty() {
+                        "native".to_string()
+                    } else {
+                        format!("{}:{}", code_a, issuer_a)
+                    };
+                    let asset_b = if issuer_b.is_empty() {
+                        "native".to_string()
+                    } else {
+                        format!("{}:{}", code_b, issuer_b)
+                    };
 
-            HorizonLiquidityPool {
-                id: format!("pool_{:064x}", i + 1),
-                fee_bp: 30,
-                pool_type: "constant_product".to_string(),
-                total_trustlines: 100 + (i as u64 * 50),
-                total_shares: shares.to_string(),
-                reserves: vec![
-                    HorizonPoolReserve {
-                        asset: asset_a,
-                        amount: amt_a.to_string(),
-                    },
-                    HorizonPoolReserve {
-                        asset: asset_b,
-                        amount: amt_b.to_string(),
-                    },
-                ],
-                paging_token: Some(format!("pt_pool_{}", i)),
-            }
-        }).collect()
+                    HorizonLiquidityPool {
+                        id: format!("pool_{:064x}", i + 1),
+                        fee_bp: 30,
+                        pool_type: "constant_product".to_string(),
+                        total_trustlines: 100 + (i as u64 * 50),
+                        total_shares: shares.to_string(),
+                        reserves: vec![
+                            HorizonPoolReserve {
+                                asset: asset_a,
+                                amount: amt_a.to_string(),
+                            },
+                            HorizonPoolReserve {
+                                asset: asset_b,
+                                amount: amt_b.to_string(),
+                            },
+                        ],
+                        paging_token: Some(format!("pt_pool_{}", i)),
+                    }
+                },
+            )
+            .collect()
     }
 }
 
