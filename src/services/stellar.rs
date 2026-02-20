@@ -107,13 +107,27 @@ pub struct Payment {
     pub paging_token: String,
     pub transaction_hash: String,
     pub source_account: String,
+    #[serde(default)]
     pub destination: String,
     pub asset_type: String,
     pub asset_code: Option<String>,
     pub asset_issuer: Option<String>,
     pub amount: String,
     pub created_at: String,
+    // Path payment fields
+    #[serde(rename = "type")]
+    pub operation_type: Option<String>,
+    // Source asset for path payments
+    pub source_asset_type: Option<String>,
+    pub source_asset_code: Option<String>,
+    pub source_asset_issuer: Option<String>,
+    pub source_amount: Option<String>,
+    // For regular payments, 'from' field
+    pub from: Option<String>,
+    // For regular payments, 'to' field
+    pub to: Option<String>,
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizonTransaction {
@@ -739,32 +753,76 @@ impl StellarRpcClient {
 
     fn mock_payments(limit: u32) -> Vec<Payment> {
         (0..limit)
-            .map(|i| Payment {
-                id: format!("payment_{}", i),
-                paging_token: format!("paging_{}", i),
-                transaction_hash: format!("txhash_{}", i),
-                source_account: format!(
-                    "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}",
-                    i
-                ),
-                destination: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i),
-                asset_type: if i % 3 == 0 {
-                    "native".to_string()
-                } else {
-                    "credit_alphanum4".to_string()
-                },
-                asset_code: if i % 3 == 0 {
-                    None
-                } else {
-                    Some("USDC".to_string())
-                },
-                asset_issuer: if i % 3 == 0 {
-                    None
-                } else {
-                    Some("GBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string())
-                },
-                amount: format!("{}.0000000", 100 + i * 10),
-                created_at: format!("2026-01-22T10:{:02}:00Z", i % 60),
+            .map(|i| {
+                let is_path_payment = i % 5 == 0;
+                let is_native_source = i % 3 == 0;
+                let is_native_dest = i % 4 == 0;
+                
+                Payment {
+                    id: format!("payment_{}", i),
+                    paging_token: format!("paging_{}", i),
+                    transaction_hash: format!("txhash_{}", i),
+                    source_account: format!(
+                        "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}",
+                        i
+                    ),
+                    destination: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i),
+                    // For regular payments, asset_type/code/issuer represent the transferred asset
+                    // For path payments, they represent the destination asset
+                    asset_type: if is_native_dest {
+                        "native".to_string()
+                    } else if i % 2 == 0 {
+                        "credit_alphanum4".to_string()
+                    } else {
+                        "credit_alphanum12".to_string()
+                    },
+                    asset_code: if is_native_dest {
+                        None
+                    } else if i % 2 == 0 {
+                        Some(["USDC", "EURT", "BRL", "NGNT"][i as usize % 4].to_string())
+                    } else {
+                        Some("LONGASSETCODE".to_string())
+                    },
+                    asset_issuer: if is_native_dest {
+                        None
+                    } else {
+                        Some(format!("GISSUER{:02}XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", i % 10))
+                    },
+                    amount: format!("{}.0000000", 100 + i * 10),
+                    created_at: format!("2026-01-22T10:{:02}:00Z", i % 60),
+                    operation_type: if is_path_payment {
+                        Some(if i % 2 == 0 { "path_payment_strict_send".to_string() } else { "path_payment_strict_receive".to_string() })
+                    } else {
+                        Some("payment".to_string())
+                    },
+                    // Source asset for path payments
+                    source_asset_type: if is_path_payment {
+                        Some(if is_native_source {
+                            "native".to_string()
+                        } else {
+                            "credit_alphanum4".to_string()
+                        })
+                    } else {
+                        None
+                    },
+                    source_asset_code: if is_path_payment && !is_native_source {
+                        Some(["USD", "EUR", "GBP", "JPY"][i as usize % 4].to_string())
+                    } else {
+                        None
+                    },
+                    source_asset_issuer: if is_path_payment && !is_native_source {
+                        Some(format!("GSRCISSUER{:02}XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", i % 10))
+                    } else {
+                        None
+                    },
+                    source_amount: if is_path_payment {
+                        Some(format!("{}.0000000", 90 + i * 10))
+                    } else {
+                        None
+                    },
+                    from: Some(format!("GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX{:03}", i)),
+                    to: Some(format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{:03}", i)),
+                }
             })
             .collect()
     }
