@@ -1,3 +1,4 @@
+use crate::network::{NetworkConfig, StellarNetwork};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,7 @@ pub struct StellarRpcClient {
     client: Client,
     rpc_url: String,
     horizon_url: String,
+    network_config: NetworkConfig,
     mock_mode: bool,
 }
 
@@ -289,21 +291,65 @@ impl StellarRpcClient {
             .build()
             .expect("Failed to build HTTP client");
 
+        // Determine network based on URLs
+        let network = if horizon_url.contains("testnet") {
+            StellarNetwork::Testnet
+        } else {
+            StellarNetwork::Mainnet
+        };
+
+        let network_config = NetworkConfig::for_network(network);
+
         Self {
             client,
             rpc_url,
             horizon_url,
+            network_config,
             mock_mode,
         }
     }
 
-    /// Create a new client with default OnFinality RPC and Horizon URLs
-    pub fn new_with_defaults(mock_mode: bool) -> Self {
-        Self::new(
-            "https://stellar.api.onfinality.io/public".to_string(),
-            "https://horizon.stellar.org".to_string(),
+    /// Create a new client with network configuration
+    pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
+        let network_config = NetworkConfig::for_network(network);
+        
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to build HTTP client");
+
+        Self {
+            client,
+            rpc_url: network_config.rpc_url.clone(),
+            horizon_url: network_config.horizon_url.clone(),
+            network_config,
             mock_mode,
-        )
+        }
+    }
+
+    /// Create a new client with default OnFinality RPC and Horizon URLs (mainnet)
+    pub fn new_with_defaults(mock_mode: bool) -> Self {
+        Self::new_with_network(StellarNetwork::Mainnet, mock_mode)
+    }
+
+    /// Get the current network configuration
+    pub fn network_config(&self) -> &NetworkConfig {
+        &self.network_config
+    }
+
+    /// Get the current network
+    pub fn network(&self) -> StellarNetwork {
+        self.network_config.network
+    }
+
+    /// Check if this client is connected to mainnet
+    pub fn is_mainnet(&self) -> bool {
+        self.network_config.is_mainnet()
+    }
+
+    /// Check if this client is connected to testnet
+    pub fn is_testnet(&self) -> bool {
+        self.network_config.is_testnet()
     }
 
     /// Check the health of the RPC endpoint
