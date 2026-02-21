@@ -337,7 +337,7 @@ impl StellarRpcClient {
     /// Create a new client with network configuration
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
         let network_config = NetworkConfig::for_network(network);
-        
+
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
