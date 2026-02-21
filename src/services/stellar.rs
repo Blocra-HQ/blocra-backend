@@ -1,9 +1,11 @@
 use crate::network::{NetworkConfig, StellarNetwork};
+use crate::rpc::error::{with_retry, CircuitBreaker, CircuitBreakerConfig, RetryConfig, RpcError};
 use crate::rpc::rate_limiter::{RpcRateLimitConfig, RpcRateLimitMetrics, RpcRateLimiter};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -62,6 +64,7 @@ pub struct StellarRpcClient {
     network_config: NetworkConfig,
     mock_mode: bool,
     rate_limiter: RpcRateLimiter,
+    circuit_breaker: Arc<Mutex<CircuitBreaker>>,
 }
 
 // ============================================================================
@@ -318,6 +321,9 @@ impl StellarRpcClient {
             .build()
             .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
+        let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default(),
+        )));
 
         // Determine network based on URLs
         let network = if horizon_url.contains("testnet") {
@@ -335,6 +341,7 @@ impl StellarRpcClient {
             network_config,
             mock_mode,
             rate_limiter,
+            circuit_breaker,
         }
     }
 
@@ -346,6 +353,9 @@ impl StellarRpcClient {
             .build()
             .expect("Failed to build HTTP client");
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
+        let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default(),
+        )));
 
         Self {
             client,
@@ -354,6 +364,7 @@ impl StellarRpcClient {
             network_config,
             mock_mode,
             rate_limiter,
+            circuit_breaker,
         }
     }
 
@@ -784,84 +795,68 @@ impl StellarRpcClient {
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
     {
-        let mut attempt = 0;
-        let mut backoff_ms = INITIAL_BACKOFF_MS;
+        let retry_config = RetryConfig {
+            max_attempts: MAX_RETRIES + 1,
+            base_delay_ms: INITIAL_BACKOFF_MS,
+            max_delay_ms: INITIAL_BACKOFF_MS * BACKOFF_MULTIPLIER.pow(MAX_RETRIES),
+        };
 
-        loop {
-            let _queue_permit = self
-                .rate_limiter
-                .acquire()
-                .await
-                .context("RPC/Horizon outbound rate limiter rejected request")?;
+        with_retry(
+            || async {
+                let queue_permit = self.rate_limiter.acquire().await.map_err(|e| {
+                    RpcError::RateLimitError(format!("outbound limiter rejected request: {}", e))
+                })?;
 
-            let start_time = Instant::now();
+                let start_time = Instant::now();
+                let response = request_fn()
+                    .await
+                    .map_err(|e| RpcError::categorize(&e.to_string()))?;
+                let elapsed = start_time.elapsed().as_millis();
+                let status = response.status();
+                let headers = response.headers().clone();
 
-            match request_fn().await {
-                Ok(response) => {
-                    let elapsed = start_time.elapsed().as_millis();
-                    let status = response.status();
-                    let headers = response.headers().clone();
+                drop(queue_permit);
+                self.rate_limiter.observe_headers(&headers).await;
 
-                    self.rate_limiter.observe_headers(&headers).await;
-
-                    if status.is_success() {
-                        debug!("Request succeeded in {} ms", elapsed);
-                        return Ok(response);
-                    } else {
-                        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                            self.rate_limiter.on_rate_limited(&headers).await;
-                        }
-
-                        let status = response.status();
-                        let error_text = response
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| "Unknown error".to_string());
-
-                        warn!(
-                            "Request failed with status {} in {} ms: {}",
-                            status, elapsed, error_text
-                        );
-
-                        if attempt >= MAX_RETRIES {
-                            anyhow::bail!(
-                                "Request failed after {} retries. Status: {}, Error: {}",
-                                MAX_RETRIES,
-                                status,
-                                error_text
-                            );
-                        }
-                    }
+                if status.is_success() {
+                    debug!("Request succeeded in {} ms", elapsed);
+                    return Ok(response);
                 }
-                Err(err) => {
-                    let elapsed = start_time.elapsed().as_millis();
-                    warn!(
-                        "Request error after {} ms (attempt {}/{}): {}",
-                        elapsed,
-                        attempt + 1,
-                        MAX_RETRIES + 1,
-                        err
-                    );
 
-                    if attempt >= MAX_RETRIES {
-                        return Err(err)
-                            .context(format!("Request failed after {} retries", MAX_RETRIES));
-                    }
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    self.rate_limiter.on_rate_limited(&headers).await;
                 }
-            }
 
-            attempt += 1;
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                warn!(
+                    "Request failed with status {} in {} ms: {}",
+                    status, elapsed, error_text
+                );
 
-            info!(
-                "Retrying request in {} ms (attempt {}/{})",
-                backoff_ms,
-                attempt + 1,
-                MAX_RETRIES + 1
-            );
-
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            backoff_ms *= BACKOFF_MULTIPLIER;
-        }
+                let msg = format!("HTTP {}: {}", status, error_text);
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    Err(RpcError::RateLimitError(msg))
+                } else if status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+                {
+                    Err(RpcError::TimeoutError(msg))
+                } else if status.as_u16() >= 500 {
+                    Err(RpcError::NetworkError(msg))
+                } else {
+                    Err(RpcError::ServerError(msg))
+                }
+            },
+            retry_config,
+            self.circuit_breaker.clone(),
+        )
+        .await
+        .map_err(|e| {
+            info!("Request failed after retry/circuit-breaker checks: {}", e);
+            anyhow!("Request failed: {}", e)
+        })
     }
 
     // ============================================================================
