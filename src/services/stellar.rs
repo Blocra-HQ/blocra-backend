@@ -1,16 +1,17 @@
 use crate::network::{NetworkConfig, StellarNetwork};
-use crate::rpc::circuit_breaker::CircuitBreaker;
-use crate::rpc::config::{
-    circuit_breaker_config_from_env, initial_backoff_from_env, max_backoff_from_env,
-    max_retries_from_env,
-};
-use crate::rpc::error::{retry_with_backoff, RpcError};
-use crate::rpc::metrics;
+use crate::rpc::error::{with_retry, CircuitBreaker, CircuitBreakerConfig, RetryConfig, RpcError};
+use crate::rpc::rate_limiter::{RpcRateLimitConfig, RpcRateLimitMetrics, RpcRateLimiter};
+use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
-use tracing::info;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
+
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF_MS: u64 = 100;
+const BACKOFF_MULTIPLIER: u64 = 2;
 const MOCK_OLDEST_LEDGER: u64 = 51_565_760;
 const MOCK_LATEST_LEDGER: u64 = 51_565_820;
 
@@ -62,6 +63,8 @@ pub struct StellarRpcClient {
     horizon_url: String,
     network_config: NetworkConfig,
     mock_mode: bool,
+    rate_limiter: RpcRateLimiter,
+    circuit_breaker: Arc<Mutex<CircuitBreaker>>,
     /// Maximum records per single request (default: 200)
     max_records_per_request: u32,
     /// Maximum total records across all paginated requests (default: 10000)
@@ -360,6 +363,10 @@ impl StellarRpcClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to build HTTP client");
+        let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
+        let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default(),
+        )));
 
         // Determine network based on URLs
         let network = if horizon_url.contains("testnet") {
@@ -394,6 +401,8 @@ impl StellarRpcClient {
             horizon_url,
             network_config,
             mock_mode,
+            rate_limiter,
+            circuit_breaker,
             max_records_per_request,
             max_total_records,
             pagination_delay_ms,
@@ -408,6 +417,10 @@ impl StellarRpcClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to build HTTP client");
+        let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
+        let circuit_breaker = Arc::new(Mutex::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default(),
+        )));
 
         // Load pagination config from environment or use defaults
         let max_records_per_request = std::env::var("RPC_MAX_RECORDS_PER_REQUEST")
@@ -431,6 +444,8 @@ impl StellarRpcClient {
             horizon_url: network_config.horizon_url.clone(),
             network_config,
             mock_mode,
+            rate_limiter,
+            circuit_breaker,
             max_records_per_request,
             max_total_records,
             pagination_delay_ms,
@@ -460,6 +475,11 @@ impl StellarRpcClient {
     /// Check if this client is connected to testnet
     pub fn is_testnet(&self) -> bool {
         self.network_config.is_testnet()
+    }
+
+    /// Snapshot current outbound RPC/Horizon rate limiter metrics.
+    pub fn rate_limit_metrics(&self) -> RpcRateLimitMetrics {
+        self.rate_limiter.metrics()
     }
 
     /// Check the health of the RPC endpoint
@@ -1298,6 +1318,76 @@ impl StellarRpcClient {
                 asset.asset_issuer.as_ref().unwrap()
             )
         }
+    }
+
+    /// Retry a request with exponential backoff
+    async fn retry_request<F, Fut>(&self, request_fn: F) -> Result<reqwest::Response>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+    {
+        let retry_config = RetryConfig {
+            max_attempts: MAX_RETRIES + 1,
+            base_delay_ms: INITIAL_BACKOFF_MS,
+            max_delay_ms: INITIAL_BACKOFF_MS * BACKOFF_MULTIPLIER.pow(MAX_RETRIES),
+        };
+
+        with_retry(
+            || async {
+                let queue_permit = self.rate_limiter.acquire().await.map_err(|e| {
+                    RpcError::RateLimitError(format!("outbound limiter rejected request: {}", e))
+                })?;
+
+                let start_time = Instant::now();
+                let response = request_fn()
+                    .await
+                    .map_err(|e| RpcError::categorize(&e.to_string()))?;
+                let elapsed = start_time.elapsed().as_millis();
+                let status = response.status();
+                let headers = response.headers().clone();
+
+                drop(queue_permit);
+                self.rate_limiter.observe_headers(&headers).await;
+
+                if status.is_success() {
+                    debug!("Request succeeded in {} ms", elapsed);
+                    return Ok(response);
+                }
+
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    self.rate_limiter.on_rate_limited(&headers).await;
+                }
+
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                warn!(
+                    "Request failed with status {} in {} ms: {}",
+                    status, elapsed, error_text
+                );
+
+                let msg = format!("HTTP {}: {}", status, error_text);
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    Err(RpcError::RateLimitError(msg))
+                } else if status == reqwest::StatusCode::REQUEST_TIMEOUT
+                    || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+                {
+                    Err(RpcError::TimeoutError(msg))
+                } else if status.as_u16() >= 500 {
+                    Err(RpcError::NetworkError(msg))
+                } else {
+                    Err(RpcError::ServerError(msg))
+                }
+            },
+            retry_config,
+            self.circuit_breaker.clone(),
+        )
+        .await
+        .map_err(|e| {
+            info!("Request failed after retry/circuit-breaker checks: {}", e);
+            anyhow!("Request failed: {}", e)
+        })
     }
 
     // ============================================================================
