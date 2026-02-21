@@ -1,4 +1,5 @@
 use crate::network::{NetworkConfig, StellarNetwork};
+use crate::rpc::rate_limiter::{RpcRateLimitConfig, RpcRateLimitMetrics, RpcRateLimiter};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,7 @@ pub struct StellarRpcClient {
     horizon_url: String,
     network_config: NetworkConfig,
     mock_mode: bool,
+    rate_limiter: RpcRateLimiter,
 }
 
 // ============================================================================
@@ -315,6 +317,7 @@ impl StellarRpcClient {
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to build HTTP client");
+        let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
 
         // Determine network based on URLs
         let network = if horizon_url.contains("testnet") {
@@ -331,17 +334,18 @@ impl StellarRpcClient {
             horizon_url,
             network_config,
             mock_mode,
+            rate_limiter,
         }
     }
 
     /// Create a new client with network configuration
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
         let network_config = NetworkConfig::for_network(network);
-        
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to build HTTP client");
+        let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
 
         Self {
             client,
@@ -349,6 +353,7 @@ impl StellarRpcClient {
             horizon_url: network_config.horizon_url.clone(),
             network_config,
             mock_mode,
+            rate_limiter,
         }
     }
 
@@ -375,6 +380,11 @@ impl StellarRpcClient {
     /// Check if this client is connected to testnet
     pub fn is_testnet(&self) -> bool {
         self.network_config.is_testnet()
+    }
+
+    /// Snapshot current outbound RPC/Horizon rate limiter metrics.
+    pub fn rate_limit_metrics(&self) -> RpcRateLimitMetrics {
+        self.rate_limiter.metrics()
     }
 
     /// Check the health of the RPC endpoint
@@ -778,16 +788,30 @@ impl StellarRpcClient {
         let mut backoff_ms = INITIAL_BACKOFF_MS;
 
         loop {
+            let _queue_permit = self
+                .rate_limiter
+                .acquire()
+                .await
+                .context("RPC/Horizon outbound rate limiter rejected request")?;
+
             let start_time = Instant::now();
 
             match request_fn().await {
                 Ok(response) => {
                     let elapsed = start_time.elapsed().as_millis();
+                    let status = response.status();
+                    let headers = response.headers().clone();
 
-                    if response.status().is_success() {
+                    self.rate_limiter.observe_headers(&headers).await;
+
+                    if status.is_success() {
                         debug!("Request succeeded in {} ms", elapsed);
                         return Ok(response);
                     } else {
+                        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                            self.rate_limiter.on_rate_limited(&headers).await;
+                        }
+
                         let status = response.status();
                         let error_text = response
                             .text()
