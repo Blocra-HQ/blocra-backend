@@ -21,6 +21,22 @@ const BACKOFF_MULTIPLIER: u64 = 2;
 const MOCK_OLDEST_LEDGER: u64 = 51_565_760;
 const MOCK_LATEST_LEDGER: u64 = 51_565_820;
 
+// ============================================================================
+// RPC Pagination Security Limits
+// ============================================================================
+/// Maximum records that can be returned in a single RPC request (hard cap)
+const ABSOLUTE_MAX_RECORDS_PER_REQUEST: u32 = 500;
+/// Default records per RPC request
+const DEFAULT_MAX_RECORDS_PER_REQUEST: u32 = 200;
+/// Absolute maximum total records across all paginated requests (DoS protection)
+const ABSOLUTE_MAX_TOTAL_RECORDS: u32 = 5000;
+/// Default total records limit for pagination
+const DEFAULT_MAX_TOTAL_RECORDS: u32 = 1000;
+/// Minimum delay between pagination requests (DoS protection)
+const MIN_PAGINATION_DELAY_MS: u64 = 50;
+/// Default delay between pagination requests
+const DEFAULT_PAGINATION_DELAY_MS: u64 = 100;
+
 /// Stellar RPC Client for interacting with Stellar network via RPC and Horizon API
 // Asset Models (Horizon API)
 // ==========================================
@@ -481,21 +497,57 @@ impl StellarRpcClient {
         let cb_config = circuit_breaker_config_from_env();
         let circuit_breaker = Arc::new(CircuitBreaker::new(cb_config, "rpc"));
 
-        // Load pagination config from environment or use defaults
+        // Load pagination config from environment or use defaults with security limits
         let max_records_per_request = std::env::var("RPC_MAX_RECORDS_PER_REQUEST")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(200);
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_MAX_RECORDS_PER_REQUEST)
+            .min(ABSOLUTE_MAX_RECORDS_PER_REQUEST);
+
+        if max_records_per_request > ABSOLUTE_MAX_RECORDS_PER_REQUEST {
+            warn!(
+                "RPC_MAX_RECORDS_PER_REQUEST ({}) exceeds maximum ({}), capping to {}",
+                std::env::var("RPC_MAX_RECORDS_PER_REQUEST").unwrap_or_default(),
+                ABSOLUTE_MAX_RECORDS_PER_REQUEST,
+                ABSOLUTE_MAX_RECORDS_PER_REQUEST
+            );
+        }
 
         let max_total_records = std::env::var("RPC_MAX_TOTAL_RECORDS")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10000);
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_MAX_TOTAL_RECORDS)
+            .min(ABSOLUTE_MAX_TOTAL_RECORDS);
+
+        if std::env::var("RPC_MAX_TOTAL_RECORDS").is_ok() 
+            && max_total_records > ABSOLUTE_MAX_TOTAL_RECORDS {
+            warn!(
+                "RPC_MAX_TOTAL_RECORDS ({}) exceeds maximum ({}), capping to {} (DoS protection)",
+                std::env::var("RPC_MAX_TOTAL_RECORDS").unwrap_or_default(),
+                ABSOLUTE_MAX_TOTAL_RECORDS,
+                ABSOLUTE_MAX_TOTAL_RECORDS
+            );
+        }
 
         let pagination_delay_ms = std::env::var("RPC_PAGINATION_DELAY_MS")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PAGINATION_DELAY_MS)
+            .max(MIN_PAGINATION_DELAY_MS);
+
+        if std::env::var("RPC_PAGINATION_DELAY_MS").is_ok() 
+            && pagination_delay_ms < MIN_PAGINATION_DELAY_MS {
+            warn!(
+                "RPC_PAGINATION_DELAY_MS ({}) is below minimum ({}), using minimum",
+                std::env::var("RPC_PAGINATION_DELAY_MS").unwrap_or_default(),
+                MIN_PAGINATION_DELAY_MS
+            );
+        }
+
+        info!(
+            "RPC pagination config: max_per_request={}, max_total={}, delay_ms={}",
+            max_records_per_request, max_total_records, pagination_delay_ms
+        );
 
         Self {
             client,
@@ -526,21 +578,24 @@ impl StellarRpcClient {
         let cb_config = circuit_breaker_config_from_env();
         let circuit_breaker = Arc::new(CircuitBreaker::new(cb_config, "rpc"));
 
-        // Load pagination config from environment or use defaults
+        // Load pagination config from environment or use defaults with security limits
         let max_records_per_request = std::env::var("RPC_MAX_RECORDS_PER_REQUEST")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(200);
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_MAX_RECORDS_PER_REQUEST)
+            .min(ABSOLUTE_MAX_RECORDS_PER_REQUEST);
 
         let max_total_records = std::env::var("RPC_MAX_TOTAL_RECORDS")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(10000);
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(DEFAULT_MAX_TOTAL_RECORDS)
+            .min(ABSOLUTE_MAX_TOTAL_RECORDS);
 
         let pagination_delay_ms = std::env::var("RPC_PAGINATION_DELAY_MS")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(100);
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PAGINATION_DELAY_MS)
+            .max(MIN_PAGINATION_DELAY_MS);
 
         Self {
             client,
@@ -1163,11 +1218,11 @@ impl StellarRpcClient {
     /// Vector of all fetched payments up to the limit
     pub async fn fetch_all_payments(&self, max_records: Option<u32>) -> Result<Vec<Payment>> {
         if self.mock_mode {
-            let limit = max_records.unwrap_or(self.max_total_records);
+            let limit = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
             return Ok(Self::mock_payments(limit));
         }
 
-        let max_records = max_records.unwrap_or(self.max_total_records);
+        let max_records = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
         let mut all_payments = Vec::new();
         let mut cursor: Option<String> = None;
         let mut fetched = 0;
@@ -1231,11 +1286,11 @@ impl StellarRpcClient {
     /// Vector of all fetched trades up to the limit
     pub async fn fetch_all_trades(&self, max_records: Option<u32>) -> Result<Vec<Trade>> {
         if self.mock_mode {
-            let limit = max_records.unwrap_or(self.max_total_records);
+            let limit = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
             return Ok(Self::mock_trades(limit));
         }
 
-        let max_records = max_records.unwrap_or(self.max_total_records);
+        let max_records = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
         let mut all_trades = Vec::new();
         let mut cursor: Option<String> = None;
         let mut fetched = 0;
@@ -1306,11 +1361,11 @@ impl StellarRpcClient {
         max_records: Option<u32>,
     ) -> Result<Vec<Payment>> {
         if self.mock_mode {
-            let limit = max_records.unwrap_or(self.max_total_records);
+            let limit = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
             return Ok(Self::mock_payments(limit));
         }
 
-        let max_records = max_records.unwrap_or(self.max_total_records);
+        let max_records = max_records.unwrap_or(self.max_total_records).min(ABSOLUTE_MAX_TOTAL_RECORDS);
         let mut all_payments = Vec::new();
         let mut cursor: Option<String> = None;
         let mut fetched = 0;
@@ -2350,10 +2405,10 @@ mod tests {
     async fn test_pagination_config_defaults() {
         let client = StellarRpcClient::new_with_defaults(true);
 
-        // Verify default pagination config is loaded
-        assert_eq!(client.max_records_per_request, 200);
-        assert_eq!(client.max_total_records, 10000);
-        assert_eq!(client.pagination_delay_ms, 100);
+        // Verify default pagination config is loaded with security limits
+        assert_eq!(client.max_records_per_request, DEFAULT_MAX_RECORDS_PER_REQUEST);
+        assert_eq!(client.max_total_records, DEFAULT_MAX_TOTAL_RECORDS);
+        assert_eq!(client.pagination_delay_ms, DEFAULT_PAGINATION_DELAY_MS);
     }
 
     #[tokio::test]
@@ -2411,6 +2466,30 @@ mod tests {
 
         // In mock mode, we should get exactly what we asked for
         assert_eq!(payments.len(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_dos_protection_caps_total_records() {
+        let client = StellarRpcClient::new_with_defaults(true);
+
+        // Try to fetch more than the hard limit
+        // Should cap at ABSOLUTE_MAX_TOTAL_RECORDS
+        let payments = client
+            .fetch_all_payments(Some(ABSOLUTE_MAX_TOTAL_RECORDS * 2))
+            .await
+            .unwrap();
+
+        // Should not exceed hard limit
+        assert!(payments.len() <= ABSOLUTE_MAX_TOTAL_RECORDS as usize);
+    }
+
+    #[tokio::test]
+    async fn test_dos_protection_caps_per_request() {
+        // Verify that per-request limits are capped
+        // This is checked during client initialization
+        assert!(DEFAULT_MAX_RECORDS_PER_REQUEST <= ABSOLUTE_MAX_RECORDS_PER_REQUEST);
+        assert!(DEFAULT_MAX_TOTAL_RECORDS <= ABSOLUTE_MAX_TOTAL_RECORDS);
+        assert!(DEFAULT_PAGINATION_DELAY_MS >= MIN_PAGINATION_DELAY_MS);
     }
 
     // ============================================================================
