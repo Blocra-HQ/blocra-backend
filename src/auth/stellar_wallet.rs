@@ -189,7 +189,9 @@ impl Sep10Service {
         let token = self.generate_session_token(&client_account)?;
 
         // Store session
-        let client_domain = challenge["client_domain"].as_str().map(std::string::ToString::to_string);
+        let client_domain = challenge["client_domain"]
+            .as_str()
+            .map(std::string::ToString::to_string);
         let session = Sep10Session {
             account: client_account,
             client_domain,
