@@ -216,7 +216,7 @@ pub struct Payment {
 impl Payment {
     /// Returns the destination account, checking the new `asset_balance_changes`
     /// format first, then falling back to the legacy `destination` / `to` fields.
-    #[must_use] 
+    #[must_use]
     pub fn get_destination(&self) -> Option<String> {
         if let Some(ref changes) = self.asset_balance_changes {
             if let Some(change) = changes.first() {
@@ -232,7 +232,7 @@ impl Payment {
     }
 
     /// Returns the transfer amount, preferring `asset_balance_changes`.
-    #[must_use] 
+    #[must_use]
     pub fn get_amount(&self) -> String {
         if let Some(ref changes) = self.asset_balance_changes {
             if let Some(change) = changes.first() {
@@ -243,7 +243,7 @@ impl Payment {
     }
 
     /// Returns the asset code, preferring `asset_balance_changes`.
-    #[must_use] 
+    #[must_use]
     pub fn get_asset_code(&self) -> Option<String> {
         if let Some(ref changes) = self.asset_balance_changes {
             if let Some(change) = changes.first() {
@@ -254,7 +254,7 @@ impl Payment {
     }
 
     /// Returns the asset issuer, preferring `asset_balance_changes`.
-    #[must_use] 
+    #[must_use]
     pub fn get_asset_issuer(&self) -> Option<String> {
         if let Some(ref changes) = self.asset_balance_changes {
             if let Some(change) = changes.first() {
@@ -573,7 +573,7 @@ impl StellarRpcClient {
     }
 
     /// Create a new client with network configuration
-    #[must_use] 
+    #[must_use]
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
         let network_config = NetworkConfig::for_network(network);
 
@@ -622,37 +622,37 @@ impl StellarRpcClient {
     }
 
     /// Create a new client with default `OnFinality` RPC and Horizon URLs (mainnet)
-    #[must_use] 
+    #[must_use]
     pub fn new_with_defaults(mock_mode: bool) -> Self {
         Self::new_with_network(StellarNetwork::Mainnet, mock_mode)
     }
 
     /// Get the current network configuration
-    #[must_use] 
+    #[must_use]
     pub const fn network_config(&self) -> &NetworkConfig {
         &self.network_config
     }
 
     /// Get the current network
-    #[must_use] 
+    #[must_use]
     pub const fn network(&self) -> StellarNetwork {
         self.network_config.network
     }
 
     /// Check if this client is connected to mainnet
-    #[must_use] 
+    #[must_use]
     pub fn is_mainnet(&self) -> bool {
         self.network_config.is_mainnet()
     }
 
     /// Check if this client is connected to testnet
-    #[must_use] 
+    #[must_use]
     pub fn is_testnet(&self) -> bool {
         self.network_config.is_testnet()
     }
 
     /// Snapshot current outbound RPC/Horizon rate limiter metrics.
-    #[must_use] 
+    #[must_use]
     pub fn rate_limit_metrics(&self) -> RpcRateLimitMetrics {
         self.rate_limiter.metrics()
     }
@@ -769,8 +769,10 @@ impl StellarRpcClient {
     ) -> Result<GetLedgersResult, RpcError> {
         if self.mock_mode {
             let start = if let Some(c) = cursor {
-                c.parse::<u64>()
-                    .ok().map_or_else(|| start_ledger.unwrap_or(MOCK_OLDEST_LEDGER), |v| v.saturating_add(1))
+                c.parse::<u64>().ok().map_or_else(
+                    || start_ledger.unwrap_or(MOCK_OLDEST_LEDGER),
+                    |v| v.saturating_add(1),
+                )
             } else {
                 start_ledger.unwrap_or(MOCK_OLDEST_LEDGER)
             };
@@ -1599,7 +1601,8 @@ impl StellarRpcClient {
             };
         }
 
-        let end = (start.saturating_add(u64::from(limit)).saturating_sub(1)).min(MOCK_LATEST_LEDGER);
+        let end =
+            (start.saturating_add(u64::from(limit)).saturating_sub(1)).min(MOCK_LATEST_LEDGER);
         let ledgers = (start..=end)
             .enumerate()
             .map(|(i, seq)| RpcLedger {
@@ -1756,9 +1759,7 @@ impl StellarRpcClient {
                 base_asset_type: "native".to_string(),
                 base_asset_code: None,
                 base_asset_issuer: None,
-                counter_account: format!(
-                    "GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{i:03}"
-                ),
+                counter_account: format!("GDYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY{i:03}"),
                 counter_amount: format!("{}.0000000", 500 + i * 50),
                 counter_asset_type: "credit_alphanum4".to_string(),
                 counter_asset_code: Some("USDC".to_string()),
@@ -2226,7 +2227,8 @@ impl StellarRpcClient {
 
     fn mock_assets(limit: u32) -> Vec<HorizonAsset> {
         let mut assets = Vec::new();
-        let issues = [(
+        let issues = [
+            (
                 "USDC",
                 "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
             ),
@@ -2241,7 +2243,8 @@ impl StellarRpcClient {
             (
                 "BTC",
                 "GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDEMNQERFT",
-            )];
+            ),
+        ];
 
         for (i, (code, issuer)) in issues.iter().take(limit as usize).enumerate() {
             let base_trustlines = 10000 - (i as i32 * 2000);
