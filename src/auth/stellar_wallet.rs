@@ -54,10 +54,12 @@ pub struct Sep10Session {
     pub expires_at: i64,
 }
 
-/// SEP-10 Authentication Service
+/// SEP-10 Authentication Service (canonical implementation used by API)
 ///
-/// This is a simplified implementation that provides the core SEP-10 functionality.
-/// For production use with actual Stellar transaction signing, integrate with stellar-sdk.
+/// This is the preferred, simplified SEP-10 workflow for this repository.
+/// It avoids direct stellar-xdr dependency issues and is the recommended entry point.
+///
+/// Use `crate::auth::sep10_simple::Sep10Service` in handler wiring.
 pub struct Sep10Service {
     pub server_public_key: String,
     pub network_passphrase: String,
