@@ -1221,15 +1221,11 @@ impl StellarRpcClient {
     /// Vector of all fetched payments up to the limit
     pub async fn fetch_all_payments(&self, max_records: Option<u32>) -> Result<Vec<Payment>> {
         if self.mock_mode {
-            let limit = max_records
-                .unwrap_or(self.max_total_records)
-                .min(ABSOLUTE_MAX_TOTAL_RECORDS);
+            let limit = self.resolve_max_records(max_records);
             return Ok(Self::mock_payments(limit));
         }
 
-        let max_records = max_records
-            .unwrap_or(self.max_total_records)
-            .min(ABSOLUTE_MAX_TOTAL_RECORDS);
+        let max_records = self.resolve_max_records(max_records);
         let mut all_payments = Vec::new();
         let mut cursor: Option<String> = None;
         let mut fetched = 0;
@@ -1242,10 +1238,7 @@ impl StellarRpcClient {
         while fetched < max_records {
             let limit = std::cmp::min(self.max_records_per_request, max_records - fetched);
 
-            let payments = self
-                .fetch_payments(limit, cursor.as_deref())
-                .await
-                .context("Failed to fetch payments page")?;
+            let payments = self.fetch_payments_page(limit, cursor.as_deref()).await?;
 
             if payments.is_empty() {
                 info!("No more payments available, stopping pagination");
@@ -1253,11 +1246,7 @@ impl StellarRpcClient {
             }
 
             fetched += payments.len() as u32;
-
-            // Extract cursor from last payment for next page
-            if let Some(last_payment) = payments.last() {
-                cursor = Some(last_payment.paging_token.clone());
-            }
+            cursor = Self::last_payment_cursor(&payments);
 
             all_payments.extend(payments);
 
@@ -1282,6 +1271,22 @@ impl StellarRpcClient {
             all_payments.len()
         );
         Ok(all_payments)
+    }
+
+    fn resolve_max_records(&self, max_records: Option<u32>) -> u32 {
+        max_records
+            .unwrap_or(self.max_total_records)
+            .min(ABSOLUTE_MAX_TOTAL_RECORDS)
+    }
+
+    async fn fetch_payments_page(&self, limit: u32, cursor: Option<&str>) -> Result<Vec<Payment>> {
+        self.fetch_payments(limit, cursor)
+            .await
+            .context("Failed to fetch payments page")
+    }
+
+    fn last_payment_cursor(payments: &[Payment]) -> Option<String> {
+        payments.last().map(|payment| payment.paging_token.clone())
     }
 
     /// Fetch all trades with automatic pagination up to `max_total_records`
