@@ -2284,6 +2284,19 @@ impl StellarRpcClient {
         }
         assets
     }
+
+    /// Fetch anchor metrics from RPC
+    pub async fn fetch_anchor_metrics(&self, _anchor_id: Uuid) -> Result<crate::api::anchors::AnchorMetrics, RpcError> {
+        // TODO: Implement actual RPC call to fetch anchor metrics
+        // For now, return mock data
+        Ok(crate::api::anchors::AnchorMetrics {
+            anchor_id: _anchor_id,
+            total_payments: 1000,
+            successful_payments: 950,
+            failed_payments: 50,
+            total_volume: 1000000.0,
+        })
+    }
 }
 
 // ============================================================================
