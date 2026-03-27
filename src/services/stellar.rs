@@ -15,6 +15,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 100;
@@ -2286,7 +2287,10 @@ impl StellarRpcClient {
     }
 
     /// Fetch anchor metrics from RPC
-    pub async fn fetch_anchor_metrics(&self, _anchor_id: Uuid) -> Result<crate::api::anchors::AnchorMetrics, RpcError> {
+    pub async fn fetch_anchor_metrics(
+        &self,
+        _anchor_id: Uuid,
+    ) -> Result<crate::api::anchors::AnchorMetrics, RpcError> {
         // TODO: Implement actual RPC call to fetch anchor metrics
         // For now, return mock data
         Ok(crate::api::anchors::AnchorMetrics {
