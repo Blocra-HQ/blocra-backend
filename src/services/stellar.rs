@@ -91,8 +91,8 @@ pub struct StellarRpcClient {
     circuit_breaker: Arc<CircuitBreaker>,
     /// Maximum records per single request (default: 200)
     max_records_per_request: u32,
-    /// Maximum total records across all paginated requests (default: 10000)
-    max_total_records: u32,
+    /// Maximum total records across all paginated requests (default: 10_000)
+    pub max_total_records: u32,
     /// Delay between pagination requests in milliseconds (default: 100)
     pagination_delay_ms: u64,
     /// Maximum retries for RPC calls
@@ -1584,7 +1584,7 @@ impl StellarRpcClient {
 
     fn mock_ledger_info() -> LedgerInfo {
         LedgerInfo {
-            sequence: 51583040,
+            sequence: 51_583_040,
             hash: "abc123def456".to_string(),
             previous_hash: "xyz789uvw012".to_string(),
             transaction_count: 245,
@@ -1615,7 +1615,7 @@ impl StellarRpcClient {
             .map(|(i, seq)| RpcLedger {
                 hash: format!("hash_{seq}"),
                 sequence: seq,
-                ledger_close_time: format!("{}", 1734032457 + i as u64 * 5),
+                ledger_close_time: format!("{}", 1_734_032_457 + i as u64 * 5),
                 header_xdr: Some("mock_header".to_string()),
                 metadata_xdr: Some("mock_metadata".to_string()),
             })
@@ -2254,7 +2254,7 @@ impl StellarRpcClient {
         ];
 
         for (i, (code, issuer)) in issues.iter().take(limit as usize).enumerate() {
-            let base_trustlines = 10000 - (i as i32 * 2000);
+            let base_trustlines = 10_000 - (i as i32 * 2_000);
             assets.push(HorizonAsset {
                 asset_type: "credit_alphanum4".to_string(),
                 asset_code: (*code).to_string(),
@@ -2298,7 +2298,7 @@ impl StellarRpcClient {
             total_payments: 1000,
             successful_payments: 950,
             failed_payments: 50,
-            total_volume: 1000000.0,
+            total_volume: 1_000_000.0,
         })
     }
 }
