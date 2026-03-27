@@ -801,9 +801,9 @@ impl StellarRpcClient {
         if let Some(c) = cursor {
             params
                 .get_mut("pagination")
-                .unwrap()
+                .expect("pagination field should exist")
                 .as_object_mut()
-                .unwrap()
+                .expect("pagination should be an object")
                 .insert("cursor".to_string(), json!(c));
         } else if let Some(start) = start_ledger {
             params.insert("startLedger".to_string(), json!(start));
