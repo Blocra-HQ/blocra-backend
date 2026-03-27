@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::fmt::Write;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -509,7 +510,7 @@ impl StellarRpcClient {
         let mut url = format!("{}/payments?order=desc&limit={}", self.horizon_url, limit);
 
         if let Some(cursor) = cursor {
-            url.push_str(&format!("&cursor={}", cursor));
+            write!(url, "&cursor={}", cursor).unwrap();
         }
 
         let response = self
@@ -541,7 +542,7 @@ impl StellarRpcClient {
         let mut url = format!("{}/trades?order=desc&limit={}", self.horizon_url, limit);
 
         if let Some(cursor) = cursor {
-            url.push_str(&format!("&cursor={}", cursor));
+            write!(url, "&cursor={}", cursor).unwrap();
         }
 
         let response = self
@@ -1211,7 +1212,7 @@ impl StellarRpcClient {
         );
 
         if let Some(cursor) = cursor {
-            url.push_str(&format!("&cursor={}", cursor));
+            write!(url, "&cursor={}", cursor).unwrap();
         }
 
         let response = self
