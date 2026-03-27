@@ -337,7 +337,7 @@ impl StellarRpcClient {
     /// Create a new client with network configuration
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
         let network_config = NetworkConfig::for_network(network);
-        
+
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -1323,7 +1323,7 @@ impl StellarRpcClient {
     // ============================================================================
 
     fn mock_liquidity_pools(limit: u32) -> Vec<HorizonLiquidityPool> {
-        let pool_configs = vec![
+        let pool_configs = [
             (
                 "USDC",
                 "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
@@ -1413,7 +1413,7 @@ impl StellarRpcClient {
 
     fn mock_assets(limit: u32) -> Vec<HorizonAsset> {
         let mut assets = Vec::new();
-        let issues = vec![
+        let issues = [
             (
                 "USDC",
                 "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
