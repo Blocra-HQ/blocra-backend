@@ -855,6 +855,9 @@ impl StellarRpcClient {
             .execute_with_retry(|| self.fetch_payments_internal(limit, cursor))
             .await;
 
+        if let Some(cursor) = cursor {
+            write!(url, "&cursor={}", cursor).unwrap();
+        }
         result.inspect_err(|e| {
             metrics::record_rpc_error(e.error_type_label(), "stellar");
         })
@@ -907,6 +910,8 @@ impl StellarRpcClient {
         })
     }
 
+        if let Some(cursor) = cursor {
+            write!(url, "&cursor={}", cursor).unwrap();
     async fn fetch_trades_internal(
         &self,
         limit: u32,
@@ -1980,6 +1985,9 @@ impl StellarRpcClient {
             "{}/liquidity_pools?order=desc&limit={}",
             self.horizon_url, limit
         );
+
+        if let Some(cursor) = cursor {
+            write!(url, "&cursor={}", cursor).unwrap();
         if let Some(c) = cursor {
             write!(url, "&cursor={c}").unwrap();
         }
