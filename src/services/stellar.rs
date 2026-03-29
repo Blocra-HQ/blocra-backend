@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use crate::network::{NetworkConfig, StellarNetwork};
 use crate::rpc::circuit_breaker::CircuitBreaker;
 use crate::rpc::config::{
@@ -265,7 +266,6 @@ impl Payment {
         }
         self.asset_issuer.clone()
     }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HorizonOperation {
@@ -916,7 +916,7 @@ impl StellarRpcClient {
         let mut url = format!("{}/trades?order=desc&limit={}", self.horizon_url, limit);
         if let Some(c) = cursor {
             write!(url, "&cursor={c}").unwrap();
-        }
+        }}
         let response = self
             .client
             .get(&url)
@@ -934,7 +934,7 @@ impl StellarRpcClient {
             .embedded
             .map(|e| e.records)
             .unwrap_or_default())
-    }}
+    }
 
     /// Fetch order book for a trading pair
     pub async fn fetch_order_book(
@@ -2796,4 +2796,5 @@ mod tests {
             }
         }
     }
-    
+}
+}
