@@ -858,7 +858,7 @@ impl StellarRpcClient {
     ) -> Result<Vec<Payment>, RpcError> {
         let mut url = format!("{}/payments?order=desc&limit={}", self.horizon_url, limit);
         if let Some(c) = cursor {
-            write!(url, "&cursor={c}").unwrap();
+            let _ = write!(url, "&cursor={c}");
         }
         let response = self
             .client
@@ -905,7 +905,7 @@ impl StellarRpcClient {
     ) -> Result<Vec<Trade>, RpcError> {
         let mut url = format!("{}/trades?order=desc&limit={}", self.horizon_url, limit);
         if let Some(c) = cursor {
-            write!(url, "&cursor={c}").unwrap();
+            let _ = write!(url, "&cursor={c}");
         }
         let response = self
             .client
@@ -1399,7 +1399,7 @@ impl StellarRpcClient {
             );
 
             if let Some(ref cursor_val) = cursor {
-                write!(url, "&cursor={cursor_val}").unwrap();
+                let _ = write!(url, "&cursor={cursor_val}");
             }
 
             let response = self
@@ -1970,7 +1970,7 @@ impl StellarRpcClient {
         );
 
         if let Some(c) = cursor {
-            write!(url, "&cursor={c}").unwrap();
+            let _ = write!(url, "&cursor={c}");
         }
         let response = self
             .client
@@ -1998,7 +1998,9 @@ impl StellarRpcClient {
     ) -> Result<HorizonLiquidityPool, RpcError> {
         if self.mock_mode {
             let pools = Self::mock_liquidity_pools(1);
-            let mut pool = pools.into_iter().next().unwrap();
+            let mut pool = pools.into_iter().next().ok_or_else(|| {
+                RpcError::ParseError("No mock liquidity pool available".to_string())
+            })?;
             pool.id = pool_id.to_string();
             return Ok(pool);
         }
