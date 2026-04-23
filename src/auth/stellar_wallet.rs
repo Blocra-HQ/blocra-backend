@@ -8,23 +8,27 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// SEP-10 challenge transaction validity duration (default: 5 minutes)
-const DEFAULT_CHALLENGE_EXPIRY_SECONDS: i64 = 300;
+fn default_challenge_expiry_seconds() -> i64 {
+    300
+}
 
 /// SEP-10 session expiry (default: 7 days)
-const DEFAULT_SESSION_EXPIRY_DAYS: i64 = 7;
+fn default_session_expiry_days() -> i64 {
+    7
+}
 
 fn challenge_expiry_seconds() -> i64 {
     std::env::var("SEP10_CHALLENGE_EXPIRY_SECONDS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_CHALLENGE_EXPIRY_SECONDS)
+        .unwrap_or_else(default_challenge_expiry_seconds)
 }
 
 fn session_expiry_days() -> i64 {
     std::env::var("SEP10_SESSION_EXPIRY_DAYS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_SESSION_EXPIRY_DAYS)
+        .unwrap_or_else(default_session_expiry_days)
 }
 
 /// SEP-10 Challenge Request
