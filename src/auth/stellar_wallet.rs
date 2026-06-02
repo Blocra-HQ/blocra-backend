@@ -99,7 +99,11 @@ impl Sep10Service {
         }
 
         // Reject placeholder keys (e.g. GXXX...XXX) where all non-G chars are identical
-        if server_public_key.chars().skip(1).all(|c| c == server_public_key.chars().nth(1).unwrap_or('X')) {
+        if server_public_key
+            .chars()
+            .skip(1)
+            .all(|c| c == server_public_key.chars().nth(1).unwrap_or('X'))
+        {
             return Err(anyhow!(
                 "SEP10_SERVER_PUBLIC_KEY is a placeholder. Set a real Stellar public key."
             ));
