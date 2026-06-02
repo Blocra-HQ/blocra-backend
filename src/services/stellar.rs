@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-
 // ============================================================================
 // RPC Pagination Security Limits
 // ============================================================================
@@ -932,7 +931,10 @@ impl StellarRpcClient {
         limit: u32,
     ) -> Result<OrderBook, RpcError> {
         if self.mock_mode {
-            return Ok(super::mock_stellar::mock_order_book(selling_asset, buying_asset));
+            return Ok(super::mock_stellar::mock_order_book(
+                selling_asset,
+                buying_asset,
+            ));
         }
 
         let result = self
@@ -1112,7 +1114,9 @@ impl StellarRpcClient {
         operation_id: &str,
     ) -> Result<Vec<HorizonEffect>, RpcError> {
         if self.mock_mode {
-            return Ok(super::mock_stellar::mock_effects_for_operation(operation_id));
+            return Ok(super::mock_stellar::mock_effects_for_operation(
+                operation_id,
+            ));
         }
 
         let result = self
@@ -1901,12 +1905,19 @@ mod tests {
     async fn test_mock_fetch_ledgers_stops_at_latest() {
         let client = StellarRpcClient::new_with_defaults(true);
         let result = client
-            .fetch_ledgers(Some(super::mock_stellar::MOCK_LATEST_LEDGER.saturating_add(1)), 5, None)
+            .fetch_ledgers(
+                Some(super::mock_stellar::MOCK_LATEST_LEDGER.saturating_add(1)),
+                5,
+                None,
+            )
             .await
             .unwrap();
 
         assert!(result.ledgers.is_empty());
-        assert_eq!(result.latest_ledger, super::mock_stellar::MOCK_LATEST_LEDGER);
+        assert_eq!(
+            result.latest_ledger,
+            super::mock_stellar::MOCK_LATEST_LEDGER
+        );
     }
 
     #[tokio::test]
