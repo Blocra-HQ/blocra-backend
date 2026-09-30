@@ -479,11 +479,23 @@ impl StellarRpcClient {
     /// * `rpc_url` - The Stellar RPC endpoint URL (e.g., `OnFinality`)
     /// * `horizon_url` - The Horizon API endpoint URL
     /// * `mock_mode` - If true, returns mock data instead of making real API calls
+    ///
+    /// # Panics
+    /// Panics if the underlying HTTP client cannot be built (TLS backend
+    /// initialisation failure). Use [`Self::try_new`] to handle that error.
+    #[must_use]
     pub fn new(rpc_url: String, horizon_url: String, mock_mode: bool) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+        Self::try_new(rpc_url, horizon_url, mock_mode).expect("Failed to build HTTP client")
+    }
+
+    /// Fallible version of [`Self::new`]: returns an error instead of panicking
+    /// when the HTTP client cannot be built.
+    pub fn try_new(
+        rpc_url: String,
+        horizon_url: String,
+        mock_mode: bool,
+    ) -> Result<Self, reqwest::Error> {
+        let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
 
         // Determine network based on URLs
@@ -550,7 +562,7 @@ impl StellarRpcClient {
             max_records_per_request, max_total_records, pagination_delay_ms
         );
 
-        Self {
+        Ok(Self {
             client,
             rpc_url,
             horizon_url,
@@ -564,18 +576,29 @@ impl StellarRpcClient {
             max_retries: max_retries_from_env(),
             initial_backoff: initial_backoff_from_env(),
             max_backoff: max_backoff_from_env(),
-        }
+        })
     }
 
     /// Create a new client with network configuration
+    ///
+    /// # Panics
+    /// Panics if the underlying HTTP client cannot be built (TLS backend
+    /// initialisation failure). Use [`Self::try_new_with_network`] to handle
+    /// that error.
     #[must_use]
     pub fn new_with_network(network: StellarNetwork, mock_mode: bool) -> Self {
+        Self::try_new_with_network(network, mock_mode).expect("Failed to build HTTP client")
+    }
+
+    /// Fallible version of [`Self::new_with_network`]: returns an error instead
+    /// of panicking when the HTTP client cannot be built.
+    pub fn try_new_with_network(
+        network: StellarNetwork,
+        mock_mode: bool,
+    ) -> Result<Self, reqwest::Error> {
         let network_config = NetworkConfig::for_network(network);
 
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
         let rate_limiter = RpcRateLimiter::new(RpcRateLimitConfig::from_env());
         let circuit_breaker = rpc_circuit_breaker();
 
@@ -598,7 +621,7 @@ impl StellarRpcClient {
             .unwrap_or(DEFAULT_PAGINATION_DELAY_MS)
             .max(MIN_PAGINATION_DELAY_MS);
 
-        Self {
+        Ok(Self {
             client,
             rpc_url: network_config.rpc_url.clone(),
             horizon_url: network_config.horizon_url.clone(),
@@ -612,7 +635,7 @@ impl StellarRpcClient {
             max_retries: max_retries_from_env(),
             initial_backoff: initial_backoff_from_env(),
             max_backoff: max_backoff_from_env(),
-        }
+        })
     }
 
     /// Create a new client with default `OnFinality` RPC and Horizon URLs (mainnet).
