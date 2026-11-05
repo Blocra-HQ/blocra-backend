@@ -54,6 +54,7 @@ pub fn summarize_block(block_number: u64, block: &Value) -> Value {
     let (mut fees_fri, mut fees_wei) = (0u128, 0u128);
     let (mut succeeded, mut reverted) = (0u64, 0u64);
     let (mut l2_gas, mut l1_gas, mut l1_data_gas) = (0u64, 0u64, 0u64);
+    let mut tx_types: std::collections::BTreeMap<String, u64> = Default::default();
 
     for entry in &txs {
         let tx = entry.get("transaction").unwrap_or(&Value::Null);
@@ -61,6 +62,8 @@ pub fn summarize_block(block_number: u64, block: &Value) -> Value {
         if let Some(sender) = tx.get("sender_address").and_then(|v| v.as_str()) {
             senders.insert(sender.to_string());
         }
+        let kind = tx.get("type").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+        *tx_types.entry(kind.to_string()).or_default() += 1;
         let fee = &receipt["actual_fee"];
         match fee.get("unit").and_then(|u| u.as_str()) {
             Some("WEI") => fees_wei += hex_u128(fee.get("amount")),
@@ -96,7 +99,9 @@ pub fn summarize_block(block_number: u64, block: &Value) -> Value {
             "gas_used": l2_gas + l1_gas,
             "l2_gas": l2_gas,
             "l1_gas": l1_gas,
-            "l1_data_gas": l1_data_gas
+            "l1_data_gas": l1_data_gas,
+            // INVOKE / DECLARE / DEPLOY_ACCOUNT / L1_HANDLER counts.
+            "tx_types": tx_types
         },
         "block_info": {
             "block_number": block_number,
@@ -116,7 +121,7 @@ mod tests {
         let block = json!({
             "timestamp": 100,
             "transactions": [
-                {"transaction": {"sender_address": "0xa"},
+                {"transaction": {"sender_address": "0xa", "type": "INVOKE"},
                  "receipt": {"actual_fee": {"amount": "0xde0b6b3a7640000", "unit": "FRI"},
                              "execution_status": "SUCCEEDED",
                              "execution_resources": {"l1_gas": 0, "l2_gas": 1000, "l1_data_gas": 64}}},
@@ -135,6 +140,8 @@ mod tests {
         assert_eq!(s["total_fees"], "2");
         assert_eq!(s["avg_fee"], "1");
         assert_eq!(s["gas_used"], 1510);
+        assert_eq!(s["tx_types"]["INVOKE"], 1);
+        assert_eq!(s["tx_types"]["UNKNOWN"], 1);
         assert!(s.get("tvl").is_none() && s.get("volume").is_none());
     }
 }
