@@ -76,10 +76,14 @@ async fn main() -> std::io::Result<()> {
     log::info!("✅ Database ready");
     
     // Initialize Alchemy service
-    let alchemy_api_key = env::var("ALCHEMY_API_KEY")
-        .unwrap_or_else(|_| "GdgtvCyIue4W16Uw7yg8p".to_string());
+    // Optional: powers POST /api/contract/transactions for EVM chains.
+    let alchemy_api_key = env::var("ALCHEMY_API_KEY").unwrap_or_default();
     let alchemy_service = AlchemyService::new(alchemy_api_key);
-    log::info!("✅ Alchemy service initialized");
+    if alchemy_service.is_configured() {
+        log::info!("✅ Alchemy service initialized");
+    } else {
+        log::warn!("ALCHEMY_API_KEY not set; /api/contract/transactions is disabled");
+    }
     
     // Warn about ephemeral storage only on cloud platforms (Render, Heroku, etc.)
     if config.database_url.contains("/tmp/") && (env::var("RENDER").is_ok() || env::var("DYNO").is_ok()) {

@@ -37,6 +37,12 @@ pub async fn fetch_transactions(
         req.chain
     );
 
+    if !alchemy.is_configured() {
+        return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+            "error": "ALCHEMY_API_KEY is not configured on this server"
+        }));
+    }
+
     // Validate chain support
     if !AlchemyService::is_supported(&req.chain) {
         return HttpResponse::BadRequest().json(serde_json::json!({

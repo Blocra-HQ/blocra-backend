@@ -101,6 +101,11 @@ impl AlchemyService {
         }
     }
 
+    /// False when ALCHEMY_API_KEY is unset; the transactions route then 503s.
+    pub fn is_configured(&self) -> bool {
+        !self.api_key.is_empty()
+    }
+
     /// Fetch all transactions for a contract address using Alchemy's indexed API
     /// INSTANT: Returns results in 100-500ms (like Dune Analytics)
     pub async fn fetch_transactions(
