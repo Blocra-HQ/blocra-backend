@@ -129,7 +129,8 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .wrap(Logger::default())
             .wrap(middleware::rate_limit::RateLimitMiddleware)
-            .service(actix_files::Files::new("/uploads", "./uploads").show_files_listing())
+            // Serve uploaded files by exact path only; no directory listing.
+            .service(actix_files::Files::new("/uploads", "./uploads"))
             .configure(routes::configure)
     })
     .bind((host.as_str(), port))?
