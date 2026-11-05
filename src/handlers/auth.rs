@@ -201,24 +201,15 @@ async fn verify_google_token(token: &str) -> Result<Value, AppError> {
     Ok(user_info)
 }
 
-pub async fn wallet_authenticate(
-    pool: &DbPool,
-    payload: WalletAuthPayload,
-) -> Result<AuthResponse, AppError> {
-    // Verify wallet signature if provided
-    if let Some(signature) = &payload.signature {
-        verify_wallet_signature(&payload.wallet_address, signature)?;
-    } else {
-        log::warn!("Wallet authentication without signature verification");
-    }
-    
-    // Create or update user
+/// Signs in (or registers) the Stellar account that `auth::stellar_wallet`
+/// has just verified a signed challenge for.
+pub async fn stellar_sign_in(pool: &DbPool, account: &str) -> Result<AuthResponse, AppError> {
     let user = sqlx::query_as::<_, User>(
         "INSERT INTO users (wallet_address, role) VALUES (?, 'user')
          ON CONFLICT(wallet_address) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
          RETURNING *"
     )
-    .bind(&payload.wallet_address)
+    .bind(account)
     .fetch_one(pool)
     .await?;
 
@@ -229,42 +220,6 @@ pub async fn wallet_authenticate(
         token,
         user: user.into(),
     })
-}
-
-/// Verify wallet signature
-/// This is a simplified implementation - in production, you'd verify the signature
-/// matches the wallet address using the appropriate blockchain's signature verification
-fn verify_wallet_signature(wallet_address: &str, signature: &str) -> Result<(), AppError> {
-    // Basic validation
-    if signature.len() < 10 {
-        return Err(AppError::Unauthorized("Invalid signature format".to_string()));
-    }
-    
-    // For Ethereum/EVM wallets (0x...)
-    if wallet_address.starts_with("0x") {
-        // In production, use ethers-rs or web3 to verify:
-        // 1. Recover address from signature
-        // 2. Compare with provided wallet_address
-        // For now, we'll accept any signature for demo purposes
-        log::info!("EVM wallet signature verification (simplified): {}", wallet_address);
-        return Ok(());
-    }
-    
-    // For Starknet wallets
-    if wallet_address.len() == 66 && wallet_address.starts_with("0x") {
-        // In production, use starknet-rs to verify signature
-        log::info!("Starknet wallet signature verification (simplified): {}", wallet_address);
-        return Ok(());
-    }
-    
-    // For Solana wallets
-    if wallet_address.len() >= 32 && !wallet_address.starts_with("0x") {
-        // In production, use solana-sdk to verify signature
-        log::info!("Solana wallet signature verification (simplified): {}", wallet_address);
-        return Ok(());
-    }
-    
-    Err(AppError::Unauthorized("Unsupported wallet type".to_string()))
 }
 
 pub async fn refresh_token(

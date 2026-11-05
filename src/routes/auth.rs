@@ -1,6 +1,7 @@
 use actix_web::{web, HttpResponse, Responder, HttpRequest};
 use actix_multipart::Multipart;
-use crate::{handlers::auth as auth_handler, db::DbPool};
+use actix_web::ResponseError;
+use crate::{auth::stellar_wallet, handlers::auth as auth_handler, db::DbPool};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -8,7 +9,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/register", web::post().to(register))
             .route("/login", web::post().to(login))
             .route("/google", web::post().to(google_auth))
-            .route("/wallet", web::post().to(wallet_auth))
+            .route("/wallet", web::post().to(wallet_auth_removed))
+            .route("/stellar/challenge", web::post().to(stellar_challenge))
+            .route("/stellar/verify", web::post().to(stellar_verify))
             .route("/refresh", web::post().to(refresh_token))
             .route("/me", web::get().to(get_current_user))
             .route("/profile", web::get().to(get_profile))
@@ -58,16 +61,46 @@ async fn google_auth(
     }
 }
 
-async fn wallet_auth(
+/// The old wallet login accepted any signature, so anyone could sign in as
+/// any address. It is gone; clients use the Stellar challenge flow below.
+async fn wallet_auth_removed() -> impl Responder {
+    HttpResponse::Gone().json(serde_json::json!({
+        "success": false,
+        "message": "Wallet sign-in moved to POST /api/auth/stellar/challenge and /api/auth/stellar/verify"
+    }))
+}
+
+/// Step 1: get a one-time challenge for a Stellar account.
+async fn stellar_challenge(
     pool: web::Data<DbPool>,
-    payload: web::Json<auth_handler::WalletAuthPayload>,
+    payload: web::Json<stellar_wallet::ChallengeRequest>,
 ) -> impl Responder {
-    match auth_handler::wallet_authenticate(&pool, payload.into_inner()).await {
-        Ok(response) => HttpResponse::Ok().json(response),
-        Err(e) => HttpResponse::Unauthorized().json(serde_json::json!({
+    match stellar_wallet::create_challenge(&pool, &payload.account).await {
+        Ok(challenge) => HttpResponse::Ok().json(challenge),
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
             "success": false,
             "message": e.to_string()
-        }))
+        })),
+    }
+}
+
+/// Step 2: send the challenge back with the wallet's signature to get a JWT.
+async fn stellar_verify(
+    pool: web::Data<DbPool>,
+    payload: web::Json<stellar_wallet::VerificationRequest>,
+) -> impl Responder {
+    let account = match stellar_wallet::verify_challenge(&pool, &payload).await {
+        Ok(account) => account,
+        Err(e) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": e.to_string()
+            }))
+        }
+    };
+    match auth_handler::stellar_sign_in(&pool, &account).await {
+        Ok(response) => HttpResponse::Ok().json(response),
+        Err(e) => e.error_response(),
     }
 }
 

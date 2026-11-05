@@ -1,369 +1,135 @@
+//! Stellar wallet sign-in.
+//!
+//! Adapted from the SEP-10-style flow in stellar-insights
+//! (`backend/src/auth/sep10_simple.rs`): the server issues a one-time challenge
+//! for an account, the wallet signs it (Freighter's `signMessage`, SEP-53),
+//! and the server checks the Ed25519 signature before issuing a BlocRA JWT.
+//! Challenges live in SQLite (`wallet_challenges`) instead of Redis, are valid
+//! for five minutes, and can be used once.
+
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
-use redis::aio::MultiplexedConnection;
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
-/// SEP-10 challenge transaction validity duration (default: 5 minutes)
-fn default_challenge_expiry_seconds() -> i64 {
-    300
-}
+use crate::db::DbPool;
 
-/// SEP-10 session expiry (default: 7 days)
-fn default_session_expiry_days() -> i64 {
-    7
-}
+/// How long a challenge stays valid.
+pub const CHALLENGE_EXPIRY_SECONDS: i64 = 300;
 
-fn challenge_expiry_seconds() -> i64 {
-    std::env::var("SEP10_CHALLENGE_EXPIRY_SECONDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(default_challenge_expiry_seconds)
-}
+const CHALLENGE_HEADER: &str = "BlocRA wants you to sign in with your Stellar account:";
 
-fn session_expiry_days() -> i64 {
-    std::env::var("SEP10_SESSION_EXPIRY_DAYS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or_else(default_session_expiry_days)
-}
-
-/// SEP-10 Challenge Request
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct ChallengeRequest {
     pub account: String,
-    #[serde(default)]
-    pub home_domain: Option<String>,
-    #[serde(default)]
-    pub client_domain: Option<String>,
-    #[serde(default)]
-    pub memo: Option<String>,
 }
 
-/// SEP-10 Challenge Response
 #[derive(Debug, Serialize)]
 pub struct ChallengeResponse {
-    pub transaction: String, // Base64-encoded XDR
-    pub network_passphrase: String,
-}
-
-/// SEP-10 Verification Request
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct VerificationRequest {
-    /// The challenge exactly as `generate_challenge` returned it.
-    pub transaction: String,
-    /// Base64 Ed25519 signature, by the challenged account's key, over the
-    /// UTF-8 bytes of `transaction`. Proves the caller holds that account.
-    #[serde(default)]
-    pub signature: Option<String>,
-}
-
-/// SEP-10 Verification Response
-#[derive(Debug, Serialize)]
-pub struct VerificationResponse {
-    pub token: String,
-    pub expires_in: i64,
-}
-
-/// SEP-10 Session Info
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Sep10Session {
-    pub account: String,
-    pub client_domain: Option<String>,
-    pub created_at: i64,
+    /// Sign these exact UTF-8 bytes with the account's key.
+    pub challenge: String,
     pub expires_at: i64,
 }
 
-/// SEP-10 Authentication Service (canonical implementation used by API)
-///
-/// This is the preferred, simplified SEP-10 workflow for this repository.
-/// It avoids direct stellar-xdr dependency issues and is the recommended entry point.
-///
-/// Use `crate::auth::sep10_simple::Sep10Service` in handler wiring.
-pub struct Sep10Service {
-    pub server_public_key: String,
-    pub network_passphrase: String,
-    pub home_domain: String,
-    redis_connection: Arc<RwLock<Option<MultiplexedConnection>>>,
+#[derive(Debug, Deserialize)]
+pub struct VerificationRequest {
+    /// The challenge exactly as `create_challenge` returned it.
+    pub challenge: String,
+    /// Base64 Ed25519 signature over the challenge (raw or SEP-53 digest).
+    pub signature: String,
 }
 
-impl Sep10Service {
-    /// Create new SEP-10 service
-    pub fn new(
-        server_public_key: String,
-        network_passphrase: String,
-        home_domain: String,
-        redis_connection: Arc<RwLock<Option<MultiplexedConnection>>>,
-    ) -> Result<Self> {
-        // Validate server public key format (should start with G and be 56 chars)
-        if !server_public_key.starts_with('G') || server_public_key.len() != 56 {
-            return Err(anyhow!("Invalid server public key format"));
-        }
+/// A `G...` account: 56 chars with a valid StrKey checksum.
+pub fn is_valid_account(account: &str) -> bool {
+    stellar_strkey::ed25519::PublicKey::from_string(account).is_ok()
+}
 
-        // Reject placeholder keys (e.g. GXXX...XXX) where all non-G chars are identical
-        if server_public_key
-            .chars()
-            .skip(1)
-            .all(|c| c == server_public_key.chars().nth(1).unwrap_or('X'))
-        {
-            return Err(anyhow!(
-                "SEP10_SERVER_PUBLIC_KEY is a placeholder. Set a real Stellar public key."
-            ));
-        }
+fn new_nonce() -> String {
+    // Two v4 UUIDs = 244 random bits from the OS RNG.
+    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())
+}
 
-        Ok(Self {
-            server_public_key,
-            network_passphrase,
-            home_domain,
-            redis_connection,
-        })
+fn challenge_text(account: &str, nonce: &str, issued_at: i64, expires_at: i64) -> String {
+    format!(
+        "{CHALLENGE_HEADER}\n{account}\n\nNonce: {nonce}\nIssued At: {issued_at}\nExpires At: {expires_at}"
+    )
+}
+
+/// Pulls (account, nonce, expires_at) back out of a challenge.
+fn parse_challenge(challenge: &str) -> Result<(String, String, i64)> {
+    let mut lines = challenge.lines();
+    if lines.next() != Some(CHALLENGE_HEADER) {
+        return Err(anyhow!("Not a BlocRA sign-in challenge"));
+    }
+    let account = lines.next().ok_or_else(|| anyhow!("Missing account"))?.to_string();
+    let mut nonce = None;
+    let mut expires_at = None;
+    for line in lines {
+        if let Some(v) = line.strip_prefix("Nonce: ") {
+            nonce = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("Expires At: ") {
+            expires_at = v.parse::<i64>().ok();
+        }
+    }
+    Ok((
+        account,
+        nonce.ok_or_else(|| anyhow!("Missing nonce"))?,
+        expires_at.ok_or_else(|| anyhow!("Missing expiry"))?,
+    ))
+}
+
+/// Issues a one-time challenge for `account` and remembers its nonce.
+pub async fn create_challenge(pool: &DbPool, account: &str) -> Result<ChallengeResponse> {
+    if !is_valid_account(account) {
+        return Err(anyhow!("Invalid Stellar account address"));
+    }
+    let now = Utc::now().timestamp();
+    let expires_at = now + CHALLENGE_EXPIRY_SECONDS;
+    let nonce = new_nonce();
+
+    // Drop stale challenges so the table can't grow without bound.
+    sqlx::query("DELETE FROM wallet_challenges WHERE expires_at < ?")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    sqlx::query("INSERT INTO wallet_challenges (nonce, account, expires_at) VALUES (?, ?, ?)")
+        .bind(&nonce)
+        .bind(account)
+        .bind(expires_at)
+        .execute(pool)
+        .await?;
+
+    Ok(ChallengeResponse {
+        challenge: challenge_text(account, &nonce, now, expires_at),
+        expires_at,
+    })
+}
+
+/// Checks the signature and consumes the challenge. Returns the verified
+/// account; the caller signs the user in as it.
+pub async fn verify_challenge(pool: &DbPool, request: &VerificationRequest) -> Result<String> {
+    let (account, nonce, expires_at) = parse_challenge(&request.challenge)?;
+
+    verify_account_signature(&account, request.challenge.as_bytes(), Some(&request.signature))?;
+
+    if Utc::now().timestamp() > expires_at {
+        return Err(anyhow!("Challenge expired"));
     }
 
-    /// Generate SEP-10 challenge transaction
-    ///
-    /// TODO #2326: Implement full SEP-10 Stellar transaction generation
-    /// Currently simplified: creates JSON challenge structure instead of proper Stellar transaction envelope
-    /// Required for production: Build actual Stellar transaction using stellar-sdk, sign with server key
-    pub async fn generate_challenge(&self, request: ChallengeRequest) -> Result<ChallengeResponse> {
-        // Validate account address format
-        if !request.account.starts_with('G') || request.account.len() != 56 {
-            return Err(anyhow!("Invalid account address format"));
-        }
-
-        // Validate home domain if provided
-        if let Some(ref domain) = request.home_domain {
-            if domain != &self.home_domain {
-                return Err(anyhow!("Invalid home domain"));
-            }
-        }
-
-        // Generate random nonce for replay protection
-        let nonce = self.generate_nonce();
-
-        // Create challenge structure
-        let challenge = serde_json::json!({
-            "type": "sep10_challenge",
-            "server": self.server_public_key,
-            "client": request.account,
-            "nonce": nonce,
-            "home_domain": self.home_domain,
-            "client_domain": request.client_domain,
-            "memo": request.memo,
-            "timestamp": Utc::now().timestamp(),
-            "expires_at": Utc::now().timestamp() + challenge_expiry_seconds(),
-            "network_passphrase": self.network_passphrase,
-        });
-
-        // Encode challenge as base64
-        let challenge_json = serde_json::to_string(&challenge)?;
-        let transaction_xdr = BASE64.encode(challenge_json.as_bytes());
-
-        // Store challenge in Redis for validation
-        self.store_challenge(&request.account, &nonce, challenge_expiry_seconds())
-            .await?;
-
-        Ok(ChallengeResponse {
-            transaction: transaction_xdr,
-            network_passphrase: self.network_passphrase.clone(),
-        })
+    // Consume: a challenge signs in at most once, and only for its account.
+    let consumed = sqlx::query(
+        "DELETE FROM wallet_challenges WHERE nonce = ? AND account = ? AND expires_at >= ?",
+    )
+    .bind(&nonce)
+    .bind(&account)
+    .bind(Utc::now().timestamp())
+    .execute(pool)
+    .await?;
+    if consumed.rows_affected() != 1 {
+        return Err(anyhow!("Challenge not found or already used"));
     }
 
-    /// Verify a signed challenge and open a session for its account.
-    ///
-    /// The caller must sign the challenge with the account's Ed25519 key
-    /// (#2326). Before this check existed, returning the challenge unsigned
-    /// produced a session for any account the caller chose to name.
-    pub async fn verify_challenge(
-        &self,
-        request: VerificationRequest,
-    ) -> Result<VerificationResponse> {
-        // Decode transaction
-        let challenge_bytes = BASE64
-            .decode(&request.transaction)
-            .map_err(|e| anyhow!("Invalid base64 encoding: {e}"))?;
-
-        let challenge_json =
-            String::from_utf8(challenge_bytes).map_err(|e| anyhow!("Invalid UTF-8: {e}"))?;
-
-        let challenge: serde_json::Value =
-            serde_json::from_str(&challenge_json).map_err(|e| anyhow!("Invalid JSON: {e}"))?;
-
-        // Validate challenge structure
-        let challenge_type = challenge["type"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Missing challenge type"))?;
-
-        if challenge_type != "sep10_challenge" {
-            return Err(anyhow!("Invalid challenge type"));
-        }
-
-        // Extract client account
-        let client_account = challenge["client"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Missing client account"))?
-            .to_string();
-
-        verify_account_signature(
-            &client_account,
-            request.transaction.as_bytes(),
-            request.signature.as_deref(),
-        )?;
-
-        // Validate expiration
-        let expires_at = challenge["expires_at"]
-            .as_i64()
-            .ok_or_else(|| anyhow!("Missing expiration"))?;
-
-        if Utc::now().timestamp() > expires_at {
-            return Err(anyhow!("Challenge expired"));
-        }
-
-        // Extract and validate nonce for replay protection
-        let nonce = challenge["nonce"]
-            .as_str()
-            .ok_or_else(|| anyhow!("Missing nonce"))?;
-
-        self.validate_and_consume_challenge(&client_account, nonce)
-            .await?;
-
-        // Generate session token
-        let token = self.generate_session_token(&client_account)?;
-
-        // Store session
-        let client_domain = challenge["client_domain"]
-            .as_str()
-            .map(std::string::ToString::to_string);
-        let session = Sep10Session {
-            account: client_account,
-            client_domain,
-            created_at: Utc::now().timestamp(),
-            expires_at: Utc::now().timestamp() + (session_expiry_days() * 24 * 60 * 60),
-        };
-
-        self.store_session(&token, &session).await?;
-
-        Ok(VerificationResponse {
-            token,
-            expires_in: session_expiry_days() * 24 * 60 * 60,
-        })
-    }
-
-    /// Validate session token
-    pub async fn validate_session(&self, token: &str) -> Result<Sep10Session> {
-        let session = self.get_session(token).await?;
-
-        // Check expiration
-        if session.expires_at < Utc::now().timestamp() {
-            self.invalidate_session(token).await?;
-            return Err(anyhow!("Session expired"));
-        }
-
-        Ok(session)
-    }
-
-    /// Invalidate session (logout)
-    pub async fn invalidate_session(&self, token: &str) -> Result<()> {
-        if let Some(conn) = self.redis_connection.read().await.as_ref() {
-            let mut conn = conn.clone();
-            let key = format!("sep10:session:{token}");
-            conn.del::<_, ()>(&key)
-                .await
-                .map_err(|e| anyhow!("Failed to invalidate session: {e}"))?;
-        }
-        Ok(())
-    }
-
-    // Private helper methods
-
-    fn generate_nonce(&self) -> String {
-        use rand::RngExt;
-        let mut rng = rand::rng();
-        let nonce: [u8; 32] = rng.random();
-        BASE64.encode(nonce)
-    }
-
-    fn generate_session_token(&self, account: &str) -> Result<String> {
-        use rand::RngExt;
-        let mut rng = rand::rng();
-        let random_bytes: [u8; 32] = rng.random();
-        let token = format!("{}:{}", account, BASE64.encode(random_bytes));
-        Ok(BASE64.encode(token.as_bytes()))
-    }
-
-    async fn store_challenge(&self, account: &str, nonce: &str, expiry: i64) -> Result<()> {
-        if let Some(conn) = self.redis_connection.read().await.as_ref() {
-            let mut conn = conn.clone();
-            let key = format!("sep10:challenge:{account}:{nonce}");
-            conn.set_ex::<_, _, ()>(&key, "1", expiry as u64)
-                .await
-                .map_err(|e| anyhow!("Failed to store challenge: {e}"))?;
-        }
-        Ok(())
-    }
-
-    async fn validate_and_consume_challenge(&self, account: &str, nonce: &str) -> Result<()> {
-        if let Some(conn) = self.redis_connection.read().await.as_ref() {
-            let mut conn = conn.clone();
-            let key = format!("sep10:challenge:{account}:{nonce}");
-
-            // Check if challenge exists
-            let exists: bool = conn
-                .exists(&key)
-                .await
-                .map_err(|e| anyhow!("Failed to check challenge: {e}"))?;
-
-            if !exists {
-                return Err(anyhow!("Challenge not found or already used"));
-            }
-
-            // Delete challenge (consume it)
-            conn.del::<_, ()>(&key)
-                .await
-                .map_err(|e| anyhow!("Failed to consume challenge: {e}"))?;
-        } else {
-            // Fail closed: refuse to validate without Redis (SEC-007)
-            tracing::error!(
-                "Redis unavailable - refusing SEP-10 challenge validation (fail closed)"
-            );
-            return Err(anyhow!("Challenge validation service unavailable"));
-        }
-        Ok(())
-    }
-
-    async fn store_session(&self, token: &str, session: &Sep10Session) -> Result<()> {
-        if let Some(conn) = self.redis_connection.read().await.as_ref() {
-            let mut conn = conn.clone();
-            let key = format!("sep10:session:{token}");
-            let session_json = serde_json::to_string(session)?;
-            let expiry = session_expiry_days() * 24 * 60 * 60;
-
-            conn.set_ex::<_, _, ()>(&key, session_json, expiry as u64)
-                .await
-                .map_err(|e| anyhow!("Failed to store session: {e}"))?;
-        }
-        Ok(())
-    }
-
-    async fn get_session(&self, token: &str) -> Result<Sep10Session> {
-        if let Some(conn) = self.redis_connection.read().await.as_ref() {
-            let mut conn = conn.clone();
-            let key = format!("sep10:session:{token}");
-
-            let session_json: Option<String> = conn
-                .get(&key)
-                .await
-                .map_err(|e| anyhow!("Failed to get session: {e}"))?;
-
-            if let Some(json) = session_json {
-                let session: Sep10Session = serde_json::from_str(&json)?;
-                return Ok(session);
-            }
-        }
-        Err(anyhow!("Session not found"))
-    }
+    Ok(account)
 }
 
 /// Check that `signature` (base64) is the Ed25519 signature of `message` by
@@ -482,76 +248,76 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_generate_challenge() {
-        let redis_conn = Arc::new(RwLock::new(None));
-        let service = Sep10Service::new(
-            "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN".to_string(),
-            "Test SDF Network ; September 2015".to_string(),
-            "example.com".to_string(),
-            redis_conn,
-        )
-        .unwrap();
+    async fn pool() -> DbPool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
 
-        let request = ChallengeRequest {
-            account: "GCLIENTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
-            home_domain: Some("example.com".to_string()),
-            client_domain: None,
-            memo: None,
+    #[actix_rt::test]
+    async fn signs_in_once_with_a_signed_challenge() {
+        let pool = pool().await;
+        let (account, key) = account_and_key(7);
+        let issued = create_challenge(&pool, &account).await.unwrap();
+
+        let request = VerificationRequest {
+            signature: sign(&key, issued.challenge.as_bytes()),
+            challenge: issued.challenge,
         };
+        assert_eq!(verify_challenge(&pool, &request).await.unwrap(), account);
+        // Replaying the same signed challenge must fail.
+        assert!(verify_challenge(&pool, &request).await.is_err());
+    }
 
-        let result = service.generate_challenge(request).await;
-        assert!(result.is_ok());
+    #[actix_rt::test]
+    async fn rejects_someone_else_signing_the_challenge() {
+        let pool = pool().await;
+        let (account, _) = account_and_key(7);
+        let (_, attacker) = account_and_key(9);
+        let issued = create_challenge(&pool, &account).await.unwrap();
+        let request = VerificationRequest {
+            signature: sign(&attacker, issued.challenge.as_bytes()),
+            challenge: issued.challenge,
+        };
+        assert!(verify_challenge(&pool, &request).await.is_err());
+    }
 
-        let response = result.unwrap();
-        assert!(!response.transaction.is_empty());
+    #[actix_rt::test]
+    async fn rejects_invalid_accounts_and_unknown_nonces() {
+        let pool = pool().await;
+        assert!(create_challenge(&pool, "INVALID").await.is_err());
+
+        // A correctly signed challenge the server never issued.
+        let (account, key) = account_and_key(7);
+        let forged = challenge_text(&account, "made-up", 0, Utc::now().timestamp() + 60);
+        let request = VerificationRequest {
+            signature: sign(&key, forged.as_bytes()),
+            challenge: forged,
+        };
+        assert!(verify_challenge(&pool, &request).await.is_err());
+    }
+
+    #[test]
+    fn challenge_round_trips() {
+        let text = challenge_text("GABC", "n0nce", 10, 310);
         assert_eq!(
-            response.network_passphrase,
-            "Test SDF Network ; September 2015"
+            parse_challenge(&text).unwrap(),
+            ("GABC".to_string(), "n0nce".to_string(), 310)
         );
+        assert!(parse_challenge("hello\nGABC").is_err());
     }
 
-    #[tokio::test]
-    async fn test_invalid_account_format() {
-        let redis_conn = Arc::new(RwLock::new(None));
-        let service = Sep10Service::new(
-            "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN".to_string(),
-            "Test SDF Network ; September 2015".to_string(),
-            "example.com".to_string(),
-            redis_conn,
-        )
-        .unwrap();
-
-        let request = ChallengeRequest {
-            account: "INVALID".to_string(),
-            home_domain: Some("example.com".to_string()),
-            client_domain: None,
-            memo: None,
-        };
-
-        let result = service.generate_challenge(request).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_invalid_home_domain() {
-        let redis_conn = Arc::new(RwLock::new(None));
-        let service = Sep10Service::new(
-            "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN".to_string(),
-            "Test SDF Network ; September 2015".to_string(),
-            "example.com".to_string(),
-            redis_conn,
-        )
-        .unwrap();
-
-        let request = ChallengeRequest {
-            account: "GCLIENTXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
-            home_domain: Some("wrong.com".to_string()),
-            client_domain: None,
-            memo: None,
-        };
-
-        let result = service.generate_challenge(request).await;
-        assert!(result.is_err());
+    #[test]
+    fn validates_account_checksums() {
+        let (account, _) = account_and_key(7);
+        assert!(is_valid_account(&account));
+        let mut broken = account.clone();
+        broken.replace_range(55..56, if account.ends_with('A') { "B" } else { "A" });
+        assert!(!is_valid_account(&broken));
+        assert!(!is_valid_account("0x07070d915635269ea0930fa1c538f2d026e02e5078884aeb007141c39f481eee"));
     }
 }

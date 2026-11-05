@@ -7,6 +7,7 @@ mod middleware;
 mod utils;
 mod errors;
 mod services;
+mod auth;
 
 use actix_web::{web, App, HttpServer, middleware::Logger};
 use actix_cors::Cors;
