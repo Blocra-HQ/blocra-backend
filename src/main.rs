@@ -14,6 +14,7 @@ use actix_cors::Cors;
 use dotenv::dotenv;
 use std::env;
 use services::alchemy::AlchemyService;
+use services::ai::AiService;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -93,6 +94,14 @@ async fn main() -> std::io::Result<()> {
         log::warn!("⚠️  See RENDER_DEPLOYMENT.md for details");
     }
     
+    // Optional: the AI analyst (chat, reports, text-to-SQL). See services/ai.rs.
+    let ai_service = AiService::from_env();
+    if ai_service.is_configured() {
+        log::info!("✅ AI analyst enabled (model {})", ai_service.model());
+    } else {
+        log::warn!("AI_BASE_URL / AI_MODEL not set; /api/ai/* will answer 503");
+    }
+
     let host = config.host.clone();
     let port = config.port;
     
@@ -126,6 +135,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(alchemy_service.clone()))
+            .app_data(web::Data::new(ai_service.clone()))
             .wrap(cors)
             .wrap(Logger::default())
             .wrap(middleware::rate_limit::RateLimitMiddleware)
