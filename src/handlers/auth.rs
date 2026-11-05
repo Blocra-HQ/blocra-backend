@@ -278,6 +278,36 @@ pub struct ImageUploadResponse {
     pub profile_picture: String,
 }
 
+/// Largest accepted profile picture.
+pub const MAX_PROFILE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// File extension for a JPEG, PNG or WebP image, by its magic bytes.
+pub fn image_extension(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::image_extension;
+
+    #[test]
+    fn detects_images_by_content() {
+        assert_eq!(image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(image_extension(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        assert_eq!(image_extension(b"<html><script>"), None);
+        assert_eq!(image_extension(b""), None);
+    }
+}
+
 pub async fn upload_profile_image(
     pool: &DbPool,
     req: &HttpRequest,
@@ -289,30 +319,35 @@ pub async fn upload_profile_image(
     std::fs::create_dir_all("uploads/profiles")
         .map_err(|e| AppError::BadRequest(format!("Failed to create upload directory: {}", e)))?;
 
-    let mut file_path = String::new();
-
-    // Process multipart data
-    while let Some(item) = payload.next().await {
+    // Read the first file field into memory, capped at MAX_PROFILE_IMAGE_BYTES.
+    let mut data: Vec<u8> = Vec::new();
+    if let Some(item) = payload.next().await {
         let mut field = item.map_err(|e| AppError::BadRequest(format!("Failed to read field: {}", e)))?;
-        
-        // Generate unique filename
-        let filename = format!("profile_{}_{}.jpg", user_id, chrono::Utc::now().timestamp());
-        file_path = format!("uploads/profiles/{}", filename);
-        
-        // Save file
-        let mut file = std::fs::File::create(&file_path)
-            .map_err(|e| AppError::BadRequest(format!("Failed to create file: {}", e)))?;
-
         while let Some(chunk) = field.next().await {
-            let data = chunk.map_err(|e| AppError::BadRequest(format!("Failed to read chunk: {}", e)))?;
-            file.write_all(&data)
-                .map_err(|e| AppError::BadRequest(format!("Failed to write file: {}", e)))?;
+            let chunk = chunk.map_err(|e| AppError::BadRequest(format!("Failed to read chunk: {}", e)))?;
+            if data.len() + chunk.len() > MAX_PROFILE_IMAGE_BYTES {
+                return Err(AppError::BadRequest(format!(
+                    "Image is larger than {} MB", MAX_PROFILE_IMAGE_BYTES / 1024 / 1024
+                )));
+            }
+            data.extend_from_slice(&chunk);
         }
     }
-
-    if file_path.is_empty() {
+    if data.is_empty() {
         return Err(AppError::BadRequest("No file uploaded".to_string()));
     }
+
+    // Trust the bytes, not the client's filename or content type.
+    let ext = image_extension(&data)
+        .ok_or_else(|| AppError::BadRequest("Only JPEG, PNG or WebP images are allowed".to_string()))?;
+    let filename = format!("profile_{}_{}.{}", user_id, chrono::Utc::now().timestamp(), ext);
+    let file_path = format!("uploads/profiles/{}", filename);
+    let mut file = std::fs::File::create(&file_path)
+        .map_err(|e| AppError::BadRequest(format!("Failed to create file: {}", e)))?;
+    file.write_all(&data)
+        .map_err(|e| AppError::BadRequest(format!("Failed to write file: {}", e)))?;
+
+
 
     // Update user profile picture in database
     let profile_picture_url = format!("/{}", file_path);
