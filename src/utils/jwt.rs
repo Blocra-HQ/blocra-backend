@@ -10,12 +10,21 @@ pub struct Claims {
     pub exp: i64,
 }
 
+/// Shortest JWT_SECRET accepted: HS256 needs a long random key to be safe.
+pub const MIN_SECRET_LEN: usize = 32;
+
+/// JWT_SECRET, or an error when it is unset or too short. There is no
+/// fallback: a default secret in public source would let anyone mint tokens.
+pub fn secret() -> Result<String, String> {
+    match env::var("JWT_SECRET") {
+        Ok(s) if s.len() >= MIN_SECRET_LEN => Ok(s),
+        Ok(_) => Err(format!("JWT_SECRET must be at least {MIN_SECRET_LEN} characters")),
+        Err(_) => Err("JWT_SECRET is not set (generate one with: openssl rand -base64 32)".into()),
+    }
+}
+
 pub fn create_token(user_id: i64) -> Result<String, AppError> {
-    let secret = env::var("JWT_SECRET")
-        .unwrap_or_else(|_| {
-            log::warn!("JWT_SECRET not set, using default");
-            "default_jwt_secret_change_in_production_12345678901234567890".to_string()
-        });
+    let secret = secret().map_err(AppError::Unauthorized)?;
     let expiration = env::var("JWT_EXPIRATION")
         .unwrap_or_else(|_| "86400".to_string())
         .parse::<i64>()
@@ -31,11 +40,7 @@ pub fn create_token(user_id: i64) -> Result<String, AppError> {
 }
 
 pub fn verify_token(token: &str) -> Result<Claims, AppError> {
-    let secret = env::var("JWT_SECRET")
-        .unwrap_or_else(|_| {
-            log::warn!("JWT_SECRET not set, using default");
-            "default_jwt_secret_change_in_production_12345678901234567890".to_string()
-        });
+    let secret = secret().map_err(AppError::Unauthorized)?;
     
     decode::<Claims>(
         token,

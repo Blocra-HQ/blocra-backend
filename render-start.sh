@@ -4,8 +4,11 @@
 # Set DATABASE_URL to use /tmp if not already set
 export DATABASE_URL="${DATABASE_URL:-sqlite:/tmp/blocra.db}"
 
-# Set default JWT_SECRET if not set (for testing only - set in Render dashboard for production)
-export JWT_SECRET="${JWT_SECRET:-default_jwt_secret_change_in_production_12345678901234567890}"
+# JWT_SECRET has no default: set it in the Render dashboard (openssl rand -base64 32).
+if [ -z "${JWT_SECRET:-}" ]; then
+  echo "JWT_SECRET is not set; refusing to start." >&2
+  exit 1
+fi
 
 # Set logging level
 export RUST_LOG="${RUST_LOG:-info}"

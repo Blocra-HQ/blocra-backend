@@ -21,6 +21,14 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
 
     let config = config::Config::from_env();
+
+    // Refuse to start without a real signing key rather than run with one
+    // anyone can read in the source.
+    if let Err(e) = utils::jwt::secret() {
+        log::error!("❌ {e}");
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     
     // Log configuration for debugging
     log::info!("🚀 Starting BlocRA Backend");

@@ -29,11 +29,8 @@ impl Config {
                     // /tmp is the only writable directory on most cloud platforms
                     "sqlite:/tmp/blocra.db".to_string()
                 }),
-            jwt_secret: env::var("JWT_SECRET")
-                .unwrap_or_else(|_| {
-                    log::warn!("JWT_SECRET not set, using default (NOT SECURE FOR PRODUCTION)");
-                    "default_jwt_secret_change_in_production_12345678901234567890".to_string()
-                }),
+            // Validated at startup in main(); never defaulted.
+            jwt_secret: env::var("JWT_SECRET").unwrap_or_default(),
             jwt_expiration: env::var("JWT_EXPIRATION")
                 .unwrap_or_else(|_| "86400".to_string())
                 .parse()
