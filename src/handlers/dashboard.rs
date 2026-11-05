@@ -1,4 +1,5 @@
 use crate::{db::DbPool, utils::jwt, errors::AppError, services::rpc::RpcService};
+use crate::services::stellar::{HorizonOperation, HorizonTransaction, LedgerInfo, StellarService};
 use actix_web::HttpRequest;
 use serde_json::{json, Value};
 
@@ -111,6 +112,71 @@ pub fn summarize_block(block_number: u64, block: &Value) -> Value {
     })
 }
 
+/// Stats for the latest Stellar ledger from Horizon: transactions (failed
+/// included), fees actually charged, source accounts and operation types.
+pub async fn get_stellar_stats(stellar: &StellarService) -> Result<Value, AppError> {
+    let ledger = stellar.latest_ledger().await?;
+    let (txs, ops) = tokio::try_join!(
+        stellar.ledger_transactions(ledger.sequence),
+        stellar.ledger_operations(ledger.sequence),
+    )?;
+    Ok(summarize_ledger(&ledger, &txs, &ops, &stellar.network))
+}
+
+/// Pure so it can be tested without Horizon.
+pub fn summarize_ledger(
+    ledger: &LedgerInfo,
+    txs: &[HorizonTransaction],
+    ops: &[HorizonOperation],
+    network: &str,
+) -> Value {
+    let timestamp = chrono::DateTime::parse_from_rfc3339(&ledger.closed_at)
+        .map(|t| t.timestamp() as u64)
+        .unwrap_or(0);
+    let senders: std::collections::HashSet<&str> = txs.iter().map(|t| t.source_account.as_str()).collect();
+    let fees_stroops: u64 = txs
+        .iter()
+        .filter_map(|t| t.fee_charged.as_deref()?.parse::<u64>().ok())
+        .sum();
+    let mut op_types: std::collections::BTreeMap<String, u64> = Default::default();
+    for op in ops {
+        *op_types.entry(op.operation_type.clone()).or_default() += 1;
+    }
+
+    // Horizon's ledger counts are authoritative; transactions_sampled shows
+    // how many of them the per-transaction figures cover.
+    let total = (ledger.successful_transaction_count + ledger.failed_transaction_count) as usize;
+    let total_fees = fees_stroops as f64 / 1e7;
+    json!({
+        "success": true,
+        "chain": "stellar",
+        "network": network,
+        "block_number": ledger.sequence,
+        "timestamp": timestamp,
+        "stats": {
+            "total_transactions": total,
+            "unique_senders": senders.len(),
+            "active_users": senders.len(),
+            "successful_txs": ledger.successful_transaction_count,
+            "failed_txs": ledger.failed_transaction_count,
+            "total_fees": total_fees.to_string(),
+            "avg_fee": if txs.is_empty() { "0".to_string() } else { (total_fees / txs.len() as f64).to_string() },
+            "fee_unit": "XLM",
+            "operations": ledger.operation_count,
+            // Operation types (payment, invoke_host_function, ...) per ledger.
+            "tx_types": op_types,
+            "base_fee_stroops": ledger.base_fee,
+            "protocol_version": ledger.protocol_version,
+            "transactions_sampled": txs.len()
+        },
+        "block_info": {
+            "block_number": ledger.sequence,
+            "timestamp": timestamp,
+            "transaction_count": total
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::summarize_block;
@@ -143,5 +209,37 @@ mod tests {
         assert_eq!(s["tx_types"]["INVOKE"], 1);
         assert_eq!(s["tx_types"]["UNKNOWN"], 1);
         assert!(s.get("tvl").is_none() && s.get("volume").is_none());
+    }
+
+    #[test]
+    fn summarizes_a_stellar_ledger() {
+        use super::summarize_ledger;
+        use crate::services::stellar::{HorizonOperation, HorizonTransaction, LedgerInfo};
+        let ledger = LedgerInfo {
+            sequence: 9, hash: "h".into(), successful_transaction_count: 1, failed_transaction_count: 1,
+            operation_count: 3, closed_at: "2026-11-05T22:03:06Z".into(), total_coins: "1".into(),
+            fee_pool: "1".into(), base_fee: 100, base_reserve: 5_000_000, protocol_version: 23,
+        };
+        let tx = |ok: bool, src: &str, fee: &str| HorizonTransaction {
+            hash: "t".into(), paging_token: "1".into(), ledger: 9, created_at: String::new(), source_account: src.into(),
+            fee_account: None, fee_charged: Some(fee.into()), max_fee: None, operation_count: 1, successful: ok,
+        };
+        let op = |kind: &str| HorizonOperation {
+            id: "o".into(), paging_token: "1".into(), transaction_hash: "t".into(), source_account: "G".into(),
+            operation_type: kind.into(), created_at: String::new(),
+        };
+        let out = summarize_ledger(
+            &ledger,
+            &[tx(true, "GA", "100"), tx(false, "GA", "300")],
+            &[op("payment"), op("payment"), op("invoke_host_function")],
+            "mainnet",
+        );
+        let s = &out["stats"];
+        assert_eq!(s["total_transactions"], 2);
+        assert_eq!(s["failed_txs"], 1);
+        assert_eq!(s["unique_senders"], 1);
+        assert_eq!(s["total_fees"], "0.00004");
+        assert_eq!(s["tx_types"]["payment"], 2);
+        assert_eq!(out["timestamp"], 1793916186);
     }
 }
