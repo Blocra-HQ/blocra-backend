@@ -1,47 +1,41 @@
-# Build stage
-FROM rust:1.75-slim as builder
+# syntax=docker/dockerfile:1
 
+# --- build ---
+FROM rust:1.96-slim-bookworm AS builder
 WORKDIR /app
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Build dependencies first so they're cached across source changes.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+ && cargo build --release --locked \
+ && rm -rf src
 
-# Copy manifests
-COPY Cargo.toml ./
+# migrations/ is embedded at compile time by sqlx::migrate!.
+COPY src ./src
+COPY migrations ./migrations
+RUN touch src/main.rs && cargo build --release --locked
 
-# Build dependencies (cached layer)
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm -rf src
-
-# Copy source code
-COPY . .
-
-# Build application
-RUN cargo build --release
-
-# Runtime stage
+# --- runtime ---
 FROM debian:bookworm-slim
-
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --home /app blocra
 WORKDIR /app
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy binary from builder
 COPY --from=builder /app/target/release/blocra-backend /app/blocra-backend
 
-# Create data directory
-RUN mkdir -p /app/data
+# SQLite and uploaded images live on volumes so they survive redeploys.
+RUN mkdir -p /app/data /app/uploads && chown -R blocra /app/data /app/uploads
+VOLUME ["/app/data", "/app/uploads"]
+ENV HOST=0.0.0.0 \
+    PORT=5000 \
+    DATABASE_URL=sqlite:/app/data/blocra.db \
+    RUST_LOG=info
+USER blocra
 
-# Expose port
 EXPOSE 5000
-
-# Run the binary
+# JWT_SECRET must be provided at run time; the server refuses to start without it.
 CMD ["/app/blocra-backend"]
