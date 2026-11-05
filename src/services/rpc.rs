@@ -5,13 +5,27 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use crate::errors::AppError;
 
-// RPC endpoints for Starknet
-const RPC_ENDPOINTS: &[&str] = &[
-    "https://rpc.starknet.lava.build",
-    "https://starknet-mainnet.g.alchemy.com/v2/demo",
-    "https://starknet-mainnet.public.blastapi.io",
-    "https://free-rpc.nethermind.io/mainnet-juno",
+// Starknet RPCs in priority order, from blocra-research/chains.json, where
+// every endpoint is checked for a real head block (last verified 2026-11-05).
+// STARKNET_RPC_URL, if set, is tried first.
+const DEFAULT_RPC_ENDPOINTS: &[&str] = &[
+    "https://starknet-rpc.publicnode.com",
+    "https://starknet.api.onfinality.io/public",
+    "https://api.zan.top/public/starknet-mainnet",
 ];
+
+fn rpc_endpoints() -> &'static [String] {
+    static ENDPOINTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    ENDPOINTS.get_or_init(|| {
+        let mut list: Vec<String> = std::env::var("STARKNET_RPC_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty())
+            .into_iter()
+            .collect();
+        list.extend(DEFAULT_RPC_ENDPOINTS.iter().map(|s| s.to_string()));
+        list
+    })
+}
 
 static CURRENT_RPC_INDEX: AtomicUsize = AtomicUsize::new(0);
 
@@ -98,8 +112,9 @@ impl RpcService {
     }
 
     fn get_rpc_url(&self) -> &'static str {
+        let endpoints = rpc_endpoints();
         let index = CURRENT_RPC_INDEX.load(Ordering::Relaxed);
-        RPC_ENDPOINTS[index % RPC_ENDPOINTS.len()]
+        &endpoints[index % endpoints.len()]
     }
 
     fn switch_rpc(&self) {
@@ -109,7 +124,7 @@ impl RpcService {
     pub async fn rpc_call(&self, method: &str, params: Value) -> Result<Value, AppError> {
         let mut last_error = None;
         
-        for attempt in 0..RPC_ENDPOINTS.len() {
+        for attempt in 0..rpc_endpoints().len() {
             let url = self.get_rpc_url();
             
             log::info!("RPC call attempt {} to {}: {}", attempt + 1, url, method);
@@ -173,6 +188,15 @@ impl RpcService {
         }
 
         Err(AppError::BadRequest("Invalid block number format".to_string()))
+    }
+
+    /// Full block with each transaction's receipt (fee, status, gas).
+    pub async fn get_block_with_receipts(&self, block_number: u64) -> Result<Value, AppError> {
+        self.rpc_call(
+            "starknet_getBlockWithReceipts",
+            json!([{"block_number": block_number}]),
+        )
+        .await
     }
 
     pub async fn get_block_with_txs(&self, block_number: u64) -> Result<BlockInfo, AppError> {

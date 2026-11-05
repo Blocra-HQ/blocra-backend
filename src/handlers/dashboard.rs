@@ -30,76 +30,111 @@ pub async fn get_analytics(pool: &DbPool) -> Result<Value, AppError> {
 }
 
 // New endpoint: Get all blockchain stats from a single block
+/// Stats for the latest Starknet block, all taken from the block's receipts.
+/// Nothing is estimated: fees are the receipts' actual fees, success and
+/// failure come from execution_status, gas from execution_resources.
 pub async fn get_blockchain_stats(rpc: &RpcService) -> Result<Value, AppError> {
-    // Fetch the latest block once
     let block_number = rpc.get_block_number().await?;
-    let block = rpc.get_block_with_txs(block_number).await?;
-    
-    // Calculate all stats from this single block
-    let total_transactions = block.transactions.len();
-    let block_timestamp = block.timestamp;
-    
-    // Get transaction details for additional metrics
-    let mut unique_senders = std::collections::HashSet::new();
-    let mut total_fees = 0u128;
-    let mut successful_txs = 0;
-    let mut failed_txs = 0;
-    let mut pending_txs = 0;
-    
-    for tx in &block.transactions {
+    let block = rpc.get_block_with_receipts(block_number).await?;
+    Ok(summarize_block(block_number, &block))
+}
+
+fn hex_u128(v: Option<&Value>) -> u128 {
+    v.and_then(|v| v.as_str())
+        .and_then(|s| u128::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0)
+}
+
+/// Pure so it can be tested without an RPC.
+pub fn summarize_block(block_number: u64, block: &Value) -> Value {
+    let timestamp = block.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let txs = block.get("transactions").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+
+    let mut senders = std::collections::HashSet::new();
+    let (mut fees_fri, mut fees_wei) = (0u128, 0u128);
+    let (mut succeeded, mut reverted) = (0u64, 0u64);
+    let (mut l2_gas, mut l1_gas, mut l1_data_gas) = (0u64, 0u64, 0u64);
+
+    for entry in &txs {
+        let tx = entry.get("transaction").unwrap_or(&Value::Null);
+        let receipt = entry.get("receipt").unwrap_or(&Value::Null);
         if let Some(sender) = tx.get("sender_address").and_then(|v| v.as_str()) {
-            unique_senders.insert(sender.to_string());
+            senders.insert(sender.to_string());
         }
-        if let Some(fee_str) = tx.get("max_fee").and_then(|v| v.as_str()) {
-            if let Ok(fee) = u128::from_str_radix(fee_str.trim_start_matches("0x"), 16) {
-                total_fees += fee;
-            }
+        let fee = &receipt["actual_fee"];
+        match fee.get("unit").and_then(|u| u.as_str()) {
+            Some("WEI") => fees_wei += hex_u128(fee.get("amount")),
+            _ => fees_fri += hex_u128(fee.get("amount")),
         }
-        
-        // Check transaction status
-        if let Some(status) = tx.get("execution_status").and_then(|v| v.as_str()) {
-            match status {
-                "SUCCEEDED" => successful_txs += 1,
-                "REVERTED" => failed_txs += 1,
-                _ => pending_txs += 1,
-            }
-        } else {
-            // If no status, assume successful
-            successful_txs += 1;
+        match receipt.get("execution_status").and_then(|v| v.as_str()) {
+            Some("REVERTED") => reverted += 1,
+            _ => succeeded += 1,
         }
+        let res = &receipt["execution_resources"];
+        l2_gas += res["l2_gas"].as_u64().unwrap_or(0);
+        l1_gas += res["l1_gas"].as_u64().unwrap_or(0);
+        l1_data_gas += res["l1_data_gas"].as_u64().unwrap_or(0);
     }
-    
-    // Calculate derived metrics from the single block
-    let active_users = unique_senders.len() as i64;
-    let gas_used = total_transactions * 21000; // Estimated
-    let volume = total_transactions * 50;
-    let tvl = gas_used * 150 + 25000000;
-    
-    Ok(json!({
+
+    let n = txs.len();
+    let total_fees_strk = fees_fri as f64 / 1e18;
+    json!({
         "success": true,
         "block_number": block_number,
-        "timestamp": block_timestamp,
+        "timestamp": timestamp,
         "stats": {
-            "total_transactions": total_transactions,
-            "active_users": active_users,
-            "gas_used": gas_used,
-            "volume": volume,
-            "tvl": tvl,
-            "unique_senders": unique_senders.len(),
-            "total_fees": (total_fees as f64 / 1e18).to_string(),
-            "avg_fee": if total_transactions > 0 {
-                ((total_fees / total_transactions as u128) as f64 / 1e18).to_string()
-            } else {
-                "0".to_string()
-            },
-            "successful_txs": successful_txs,
-            "failed_txs": failed_txs,
-            "pending_txs": pending_txs
+            "total_transactions": n,
+            "unique_senders": senders.len(),
+            "active_users": senders.len(),
+            "successful_txs": succeeded,
+            "failed_txs": reverted,
+            // Fees paid in STRK (FRI); the few legacy ETH-fee txs are reported separately.
+            "total_fees": total_fees_strk.to_string(),
+            "avg_fee": if n > 0 { (total_fees_strk / n as f64).to_string() } else { "0".to_string() },
+            "fee_unit": "STRK",
+            "total_fees_eth": (fees_wei as f64 / 1e18).to_string(),
+            "gas_used": l2_gas + l1_gas,
+            "l2_gas": l2_gas,
+            "l1_gas": l1_gas,
+            "l1_data_gas": l1_data_gas
         },
         "block_info": {
             "block_number": block_number,
-            "timestamp": block_timestamp,
-            "transaction_count": total_transactions
+            "timestamp": timestamp,
+            "transaction_count": n
         }
-    }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_block;
+    use serde_json::json;
+
+    #[test]
+    fn summarizes_from_receipts_only() {
+        let block = json!({
+            "timestamp": 100,
+            "transactions": [
+                {"transaction": {"sender_address": "0xa"},
+                 "receipt": {"actual_fee": {"amount": "0xde0b6b3a7640000", "unit": "FRI"},
+                             "execution_status": "SUCCEEDED",
+                             "execution_resources": {"l1_gas": 0, "l2_gas": 1000, "l1_data_gas": 64}}},
+                {"transaction": {"sender_address": "0xa"},
+                 "receipt": {"actual_fee": {"amount": "0xde0b6b3a7640000", "unit": "FRI"},
+                             "execution_status": "REVERTED",
+                             "execution_resources": {"l1_gas": 10, "l2_gas": 500, "l1_data_gas": 0}}}
+            ]
+        });
+        let out = summarize_block(7, &block);
+        let s = &out["stats"];
+        assert_eq!(s["total_transactions"], 2);
+        assert_eq!(s["unique_senders"], 1);
+        assert_eq!(s["successful_txs"], 1);
+        assert_eq!(s["failed_txs"], 1);
+        assert_eq!(s["total_fees"], "2");
+        assert_eq!(s["avg_fee"], "1");
+        assert_eq!(s["gas_used"], 1510);
+        assert!(s.get("tvl").is_none() && s.get("volume").is_none());
+    }
 }
