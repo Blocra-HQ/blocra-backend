@@ -17,6 +17,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
 }
 
 fn error(e: AiError) -> HttpResponse {
+    log::warn!("AI request failed: {e}");
     let body = json!({ "success": false, "message": e.to_string() });
     match e {
         AiError::NotConfigured => HttpResponse::ServiceUnavailable().json(body),
