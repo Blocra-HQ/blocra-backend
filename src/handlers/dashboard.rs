@@ -4,26 +4,28 @@ use serde_json::{json, Value};
 
 pub async fn get_dashboard_data(pool: &DbPool, req: &HttpRequest) -> Result<Value, AppError> {
     let user_id = jwt::extract_user_id(req)?;
-    
-    let bounties: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bounties WHERE created_by = ?")
-        .bind(&user_id).fetch_one(pool).await?;
-    let submissions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM submissions WHERE user_id = ?")
-        .bind(&user_id).fetch_one(pool).await?;
-    
+
+    // contract_queries.user_id is TEXT, dashboards.user_id is INTEGER.
+    let queries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contract_queries WHERE user_id = ?")
+        .bind(user_id.to_string()).fetch_one(pool).await?;
+    let dashboards: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboards WHERE user_id = ?")
+        .bind(user_id).fetch_one(pool).await?;
+
     Ok(json!({
-        "bounties": bounties,
-        "submissions": submissions
+        "queries": queries,
+        "dashboards": dashboards
     }))
 }
 
 pub async fn get_analytics(pool: &DbPool) -> Result<Value, AppError> {
-    let total_bounties: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bounties").fetch_one(pool).await?;
-    let active_bounties: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bounties WHERE status = 'open'")
-        .fetch_one(pool).await?;
-    
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(pool).await?;
+    let queries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM contract_queries").fetch_one(pool).await?;
+    let dashboards: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboards").fetch_one(pool).await?;
+
     Ok(json!({
-        "total_bounties": total_bounties,
-        "active_bounties": active_bounties
+        "total_users": users,
+        "total_queries": queries,
+        "total_dashboards": dashboards
     }))
 }
 

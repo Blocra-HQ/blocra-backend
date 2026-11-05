@@ -1,7 +1,6 @@
 use actix_web::web;
 
 mod auth;
-mod bounty;
 mod admin;
 mod contract;
 mod dashboard;
@@ -17,7 +16,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(health::configure)
             .configure(auth::configure)
             .configure(admin::configure)
-            .configure(bounty::configure)
             .configure(contract::configure)
             .configure(dashboard::configure)
             .configure(query::configure)
