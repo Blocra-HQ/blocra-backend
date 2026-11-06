@@ -27,15 +27,18 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=builder /app/target/release/blocra-backend /app/blocra-backend
 
-# SQLite and uploaded images live on volumes so they survive redeploys.
-RUN mkdir -p /app/data /app/uploads && chown -R blocra /app/data /app/uploads
-VOLUME ["/app/data", "/app/uploads"]
+# SQLite (main and analytics databases) and uploaded images live on one
+# volume so they survive redeploys; mount persistent storage at /app/data.
+RUN mkdir -p /app/data/uploads && chown -R blocra:blocra /app
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+VOLUME ["/app/data"]
 ENV HOST=0.0.0.0 \
     PORT=5000 \
-    DATABASE_URL=sqlite:/app/data/blocra.db \
+    DATABASE_URL=sqlite:/app/data/blocra.db?mode=rwc \
     RUST_LOG=info
-USER blocra
 
 EXPOSE 5000
-# JWT_SECRET must be provided at run time; the server refuses to start without it.
-CMD ["/app/blocra-backend"]
+# Starts as root only to fix volume ownership, then drops to the blocra user
+# (see docker-entrypoint.sh). JWT_SECRET must be provided at run time; the
+# server refuses to start without it.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

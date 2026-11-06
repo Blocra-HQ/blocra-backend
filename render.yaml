@@ -1,0 +1,49 @@
+# Render Blueprint for the BlocRA API.
+# Render dashboard -> New -> Blueprint -> select this repository.
+#
+# The Starter plan is required: the ledger collector runs continuously and the
+# SQLite databases need a persistent disk (free services sleep and have none).
+services:
+  - type: web
+    name: blocra-api
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    disk:
+      name: blocra-data
+      mountPath: /app/data
+      sizeGB: 10
+    envVars:
+      # Generated once by Render; keeps sessions valid across deploys.
+      - key: JWT_SECRET
+        generateValue: true
+      # Stellar secret seed (S...) BlocRA signs reports with. Keep it stable:
+      # changing it breaks verification of earlier reports.
+      - key: BLOCRA_SIGNING_SECRET
+        sync: false
+      # Comma-separated frontend origins, e.g. https://blocra.app
+      - key: CORS_ORIGIN
+        sync: false
+      # At least 12 characters; enables /api/admin/login.
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: TRUST_PROXY
+        value: "1"
+      - key: RUST_LOG
+        value: info
+      - key: STELLAR_NETWORK
+        value: mainnet
+      - key: ANALYTICS_STELLAR_BACKFILL
+        value: "30"
+      - key: ANALYTICS_TX_RETENTION_HOURS
+        value: "24"
+      - key: ANALYTICS_BLOCK_RETENTION_DAYS
+        value: "90"
+      # Optional AI analyst (gpt-oss through any OpenAI-compatible endpoint).
+      - key: AI_BASE_URL
+        sync: false
+      - key: AI_API_KEY
+        sync: false

@@ -6,6 +6,8 @@ pub type DbPool = SqlitePool;
 pub async fn init_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
     // Extract the file path from the database URL
     let db_path = database_url.strip_prefix("sqlite:").unwrap_or(database_url);
+    // "sqlite:/path/db.sqlite?mode=rwc": the file is the part before the options.
+    let db_path = db_path.split('?').next().unwrap_or(db_path);
     
     log::info!("Initializing database at: {}", db_path);
     log::info!("Full database URL: {}", database_url);
