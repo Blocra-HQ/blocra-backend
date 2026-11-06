@@ -102,7 +102,23 @@ async fn main() -> std::io::Result<()> {
         log::warn!("AI_BASE_URL not set; /api/ai/* will answer 503");
     }
 
-    // Profile images are written under ./uploads; serve it even before the first upload.
+    // Collected chain data for the dashboard history and SQL queries.
+    let analytics_url = services::analytics::database_url(&config.database_url);
+    let analytics_store = match services::analytics::Analytics::open(&analytics_url).await {
+        Ok(store) => store,
+        Err(e) => {
+            log::error!("❌ Failed to open analytics database {analytics_url}: {e}");
+            panic!("Failed to open analytics database: {e}");
+        }
+    };
+    log::info!("✅ Analytics store at {analytics_url}");
+    if services::collector::enabled() {
+        services::collector::spawn(analytics_store.clone(), services::stellar::StellarService::from_env());
+    } else {
+        log::warn!("ANALYTICS_COLLECT=false; Stellar ledgers are not collected");
+    }
+
+        // Profile images are written under ./uploads; serve it even before the first upload.
     if let Err(e) = std::fs::create_dir_all("./uploads/profiles") {
         log::warn!("Could not create ./uploads: {e}");
     }
@@ -145,6 +161,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(alchemy_service.clone()))
             .app_data(web::Data::new(ai_service.clone()))
+            .app_data(web::Data::new(analytics_store.clone()))
             .wrap(cors)
             .wrap(Logger::default())
             .wrap(middleware::rate_limit::RateLimitMiddleware)

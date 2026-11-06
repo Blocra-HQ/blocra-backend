@@ -18,11 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-/// Tables the in-app SQL engine understands (frontend utils/queryLimits.ts).
-const SQL_SCHEMA: &str = "\
-blocks(block_number INTEGER, timestamp INTEGER, transaction_count INTEGER, gas_used INTEGER)
-transactions(transaction_hash TEXT, block_number INTEGER, sender_address TEXT, max_fee INTEGER, type TEXT, timestamp INTEGER)
-contracts(address TEXT, class_hash TEXT, deployed_at_block INTEGER)";
+
 
 const ANALYST_PROMPT: &str = "You are BlocRA's on-chain analyst. BlocRA is a blockchain analytics \
 platform built for Stellar: users analyze Soroban contracts and smart contracts on 37 chains \
@@ -192,9 +188,13 @@ impl AiService {
         if question.trim().is_empty() || question.len() > 1_000 {
             return Err(AiError::BadRequest("question must be 1-1000 characters".into()));
         }
+        // The tables of BlocRA's analytics store (services::analytics).
         let prompt = format!(
-            "Tables:\n{SQL_SCHEMA}\n\nWrite one read-only SQL SELECT query (SQLite dialect, with a LIMIT of \
-             at most 100) that answers: {question}\nReply with the SQL only, no explanation, no code fences."
+            "SQLite tables:\n{}\n\nNotes: timestamp columns are unix seconds (use datetime(timestamp, 'unixepoch') \
+             or strftime('%H:%M', timestamp, 'unixepoch')); filter by chain, e.g. chain = 'stellar'.\n\
+             Write one read-only SQL SELECT query (SQLite dialect, with a LIMIT of at most 100) that answers: \
+             {question}\nReply with the SQL only, no explanation, no code fences.",
+            crate::services::analytics::schema_for_prompt()
         );
         let raw = self.complete(vec![system(ANALYST_PROMPT), user(&prompt)], 0.0).await?;
         Ok(clean_sql(&raw))

@@ -10,6 +10,7 @@ mod feedback;
 mod dashboard_builder;
 mod contract_transactions;
 mod ai;
+mod sql;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -24,5 +25,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(dashboard_builder::configure)
             .configure(contract_transactions::configure)
             .configure(ai::configure)
+            .configure(sql::configure)
     );
 }

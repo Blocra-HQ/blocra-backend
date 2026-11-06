@@ -161,6 +161,14 @@ impl StellarService {
             .ok_or_else(|| AppError::BadRequest("Horizon returned no ledgers".into()))
     }
 
+    /// Up to `limit` (max 200) ledgers after `after`, oldest first.
+    pub async fn ledgers_after(&self, after: u64, limit: u32) -> Result<Vec<LedgerInfo>, AppError> {
+        // A ledger's paging token is its sequence shifted left by 32 bits.
+        let cursor = after << 32;
+        self.records(&format!("/ledgers?order=asc&limit={}&cursor={cursor}", limit.clamp(1, PAGE_LIMIT)))
+            .await
+    }
+
     /// Follows Horizon's cursor until the collection is exhausted (or
     /// MAX_PAGES pages have been read).
     async fn all_records<T: for<'de> Deserialize<'de> + Paged>(&self, base: &str) -> Result<Vec<T>, AppError> {
