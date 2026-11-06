@@ -99,7 +99,7 @@ async fn main() -> std::io::Result<()> {
     if ai_service.is_configured() {
         log::info!("✅ AI analyst enabled (model {})", ai_service.model());
     } else {
-        log::warn!("AI_BASE_URL / AI_MODEL not set; /api/ai/* will answer 503");
+        log::warn!("AI_BASE_URL not set; /api/ai/* will answer 503");
     }
 
     let host = config.host.clone();
@@ -120,8 +120,12 @@ async fn main() -> std::io::Result<()> {
                 ])
                 .max_age(3600)
         } else {
-            Cors::default()
-                .allowed_origin(&cors_origin)
+            // Comma-separated list, e.g. https://blocra.app,https://www.blocra.app
+            let mut cors = Cors::default();
+            for origin in cors_origin.split(',').map(str::trim).filter(|o| !o.is_empty()) {
+                cors = cors.allowed_origin(origin);
+            }
+            cors
                 .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "OPTIONS"])
                 .allowed_headers(vec![
                     actix_web::http::header::CONTENT_TYPE,
