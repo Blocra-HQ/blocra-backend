@@ -7,11 +7,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("", web::post().to(create_dashboard))
             .route("", web::get().to(get_dashboards))
             .route("/{id}", web::get().to(get_dashboard))
+            .route("/{id}", web::put().to(replace_dashboard))
             .route("/{id}", web::delete().to(delete_dashboard))
             .route("/{id}/widgets", web::post().to(add_widget))
             .route("/widgets/{id}", web::put().to(update_widget))
             .route("/widgets/{id}", web::delete().to(delete_widget))
-            .route("/queries", web::get().to(get_saved_queries))
             .route("/suggest/{query_id}", web::get().to(suggest_chart))
     );
 }
@@ -21,10 +21,23 @@ async fn create_dashboard(
     req: HttpRequest,
     payload: web::Json<CreateDashboardPayload>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let dashboard = dashboard_builder::create_dashboard(&pool, &req, payload.into_inner()).await?;
+    let saved = dashboard_builder::create_dashboard(&pool, &req, payload.into_inner()).await?;
     Ok(HttpResponse::Created().json(serde_json::json!({
         "success": true,
-        "dashboard": dashboard
+        "data": saved
+    })))
+}
+
+async fn replace_dashboard(
+    pool: web::Data<DbPool>,
+    req: HttpRequest,
+    path: web::Path<i64>,
+    payload: web::Json<CreateDashboardPayload>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let saved = dashboard_builder::replace_dashboard(&pool, &req, path.into_inner(), payload.into_inner()).await?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": saved
     })))
 }
 
@@ -108,17 +121,6 @@ async fn delete_dashboard(
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "success": true,
         "message": "Dashboard deleted"
-    })))
-}
-
-async fn get_saved_queries(
-    pool: web::Data<DbPool>,
-    req: HttpRequest,
-) -> Result<HttpResponse, actix_web::Error> {
-    let queries = dashboard_builder::get_saved_queries(&pool, &req).await?;
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "queries": queries
     })))
 }
 

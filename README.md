@@ -120,11 +120,10 @@ Without `AI_BASE_URL` and `AI_MODEL` these answer `503`. Provider failures answe
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET / POST | `/api/dashboard-builder` | JWT | List or create dashboards |
-| GET / DELETE | `/api/dashboard-builder/{id}` | JWT | Read (with widgets) or delete a dashboard |
+| GET / POST | `/api/dashboard-builder` | JWT | List or create dashboards (`{name, description, widgets?}`; a widget carries `query_sql` or a `data` snapshot) |
+| GET / PUT / DELETE | `/api/dashboard-builder/{id}` | JWT | Read (with widgets), rename and replace widgets, or delete a dashboard |
 | POST | `/api/dashboard-builder/{id}/widgets` | JWT | Add a widget |
 | PUT / DELETE | `/api/dashboard-builder/widgets/{id}` | JWT | Move/resize or remove a widget |
-| GET | `/api/dashboard-builder/queries` | JWT | Queries available for widgets |
 | GET | `/api/dashboard-builder/suggest/{query_id}` | JWT | Suggested chart type for a query |
 
 ### Contract analysis
