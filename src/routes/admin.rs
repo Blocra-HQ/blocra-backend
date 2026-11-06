@@ -13,6 +13,44 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+/// Shortest ADMIN_PASSWORD accepted; anything shorter disables admin login.
+const MIN_ADMIN_PASSWORD_LEN: usize = 12;
+
+#[derive(Debug, PartialEq, Eq)]
+enum AdminAuth {
+    Disabled,
+    Denied,
+    Granted,
+}
+
+/// Compares the submitted password with ADMIN_PASSWORD in constant time
+/// (equal-length sha256 digests, XOR-folded), so timing reveals nothing.
+fn check_admin_password(configured: Option<&str>, submitted: &str) -> AdminAuth {
+    use sha2::{Digest, Sha256};
+    let Some(expected) = configured.filter(|p| p.len() >= MIN_ADMIN_PASSWORD_LEN) else {
+        return AdminAuth::Disabled;
+    };
+    let a = Sha256::digest(expected.as_bytes());
+    let b = Sha256::digest(submitted.as_bytes());
+    let diff = a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    if diff == 0 { AdminAuth::Granted } else { AdminAuth::Denied }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_login_needs_a_configured_strong_password() {
+        assert_eq!(check_admin_password(None, "anything"), AdminAuth::Disabled);
+        assert_eq!(check_admin_password(Some("short"), "short"), AdminAuth::Disabled);
+        let pw = "correct horse battery staple";
+        assert_eq!(check_admin_password(Some(pw), pw), AdminAuth::Granted);
+        assert_eq!(check_admin_password(Some(pw), "wrong password!!"), AdminAuth::Denied);
+        assert_eq!(check_admin_password(Some(pw), ""), AdminAuth::Denied);
+    }
+}
+
 #[derive(Deserialize)]
 struct AdminLoginPayload {
     password: String,
@@ -22,12 +60,20 @@ async fn admin_login(
     pool: web::Data<DbPool>,
     payload: web::Json<AdminLoginPayload>,
 ) -> impl Responder {
-    // Simple password check - in production, use proper auth
-    if payload.password != "Ndifreke000" {
-        return HttpResponse::Unauthorized().json(serde_json::json!({
-            "success": false,
-            "message": "Invalid password"
-        }));
+    match check_admin_password(std::env::var("ADMIN_PASSWORD").ok().as_deref(), &payload.password) {
+        AdminAuth::Disabled => {
+            return HttpResponse::ServiceUnavailable().json(serde_json::json!({
+                "success": false,
+                "message": format!("Admin login is disabled: set ADMIN_PASSWORD (at least {MIN_ADMIN_PASSWORD_LEN} characters)")
+            }));
+        }
+        AdminAuth::Denied => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "Invalid password"
+            }));
+        }
+        AdminAuth::Granted => {}
     }
 
     // Get or create admin user

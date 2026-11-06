@@ -130,7 +130,7 @@ Without `AI_BASE_URL` and `AI_MODEL` these answer `503`. Provider failures answe
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/admin/login` | password | Admin sign-in (see [Known issues](#known-issues)) |
+| POST | `/api/admin/login` | `ADMIN_PASSWORD` | Admin sign-in; `503` when `ADMIN_PASSWORD` is unset or shorter than 12 characters |
 | GET | `/api/admin/dashboard` | JWT, admin role | Platform overview |
 | GET | `/api/admin/users` | JWT, admin role | All users |
 | GET | `/api/admin/users/{user_id}` | JWT, admin role | A user's activity |
@@ -179,6 +179,7 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `AI_MODEL` | none | no | Model name for the AI endpoints |
 | `AI_API_KEY` | none | no | Bearer token for hosted AI providers |
 | `AI_TIMEOUT_SECS` | `120` | no | Timeout per AI request |
+| `ADMIN_PASSWORD` | none | no | Enables `POST /api/admin/login` (at least 12 characters, compared in constant time) |
 | `GOOGLE_CLIENT_ID` | none | no | Google OAuth |
 | `GOOGLE_CLIENT_SECRET` | none | no | Google OAuth |
 | `RATE_LIMIT_MAX_REQUESTS` | `100` | no | Read into config, not yet enforced (see [Known issues](#known-issues)) |
@@ -279,8 +280,6 @@ scripts/               production setup helper
 
 These are tracked for fixing:
 
-- `POST /api/admin/login` checks a fixed password in `src/routes/admin.rs`. It should read a hashed
-  secret from the environment or use the admin role on an authenticated account.
 - `DELETE /api/queries/{id}` and `GET /api/queries/{id}` do not check the caller owns the query.
 - `RateLimitMiddleware` currently passes every request through; the `RATE_LIMIT_*` settings are not
   enforced.
