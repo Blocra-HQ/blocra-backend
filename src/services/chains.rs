@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn registry_parses_and_covers_every_type() {
         let reg = registry();
-        assert_eq!(reg.len(), 40);
+        assert_eq!(reg.len(), 37);
         for (id, c) in reg {
             assert!(!c.rpcs.is_empty(), "{id} has no RPCs");
             assert!(

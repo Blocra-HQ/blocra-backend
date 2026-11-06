@@ -32,7 +32,7 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 
 | Area | What it does |
 |------|--------------|
-| Network dashboard | Latest block statistics for 40 chains: Stellar (Horizon), Starknet, 34 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types) |
+| Network dashboard | Latest block statistics for 37 chains: Stellar (Horizon), Starknet, 31 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types) |
 | Stellar sign-in | Challenge/response login with a Stellar wallet (Freighter `signMessage`, SEP-53), issuing a JWT |
 | Accounts | Email/password, Google OAuth, profile and profile picture |
 | AI analyst | Chat, written contract reports and natural-language-to-SQL through any OpenAI-compatible model |
@@ -90,7 +90,7 @@ tried first when set. Endpoints whose head block is more than an hour old are sk
 
 | Type | Chains | Source | Notes |
 |------|--------|--------|-------|
-| `evm` | ethereum, base, arbitrum, optimism, polygon, bnb, avalanche, zksync, linea, scroll, blast, zora, mantle, unichain, taiko, cronos, okxchain, aurora, moonbeam, moonriver, gnosis, celo, berachain, sei, kava, metis, flare, songbird, fuse, chiliz, pulsechain, haqq, syscoin, xpla | `eth_getBlockByNumber` and `eth_getBlockReceipts` (per-transaction receipts where unsupported) | Fees are gas used x effective gas price, plus the rollup L1 fee and blob fee when the receipt reports them. Celo transactions paying fees in other tokens are counted in `non_native_fee_txs` and left out of `total_fees`. `tx_types` are envelope types; `tx_kinds` splits transfers, calls and contract creations |
+| `evm` | ethereum, base, arbitrum, optimism, polygon, bnb, avalanche, zksync, linea, scroll, zora, mantle, unichain, taiko, cronos, okxchain, aurora, gnosis, celo, berachain, sei, kava, metis, flare, songbird, fuse, chiliz, pulsechain, haqq, syscoin, xpla | `eth_getBlockByNumber` and `eth_getBlockReceipts` (per-transaction receipts where unsupported) | Fees are gas used x effective gas price, plus the rollup L1 fee and blob fee when the receipt reports them. Celo transactions paying fees in other tokens are counted in `non_native_fee_txs` and left out of `total_fees`. `tx_types` are envelope types; `tx_kinds` splits transfers, calls and contract creations |
 | `solana` | solana | `getSlot`, `getBlock` (confirmed) | Fees from `meta.fee`, failures from `meta.err`, senders are fee payers, `gas_used` is compute units; `tx_types` are message versions |
 | `cometbft` | axelar, celer, saga | `block`, `block_results` | Status and gas from `txs_results`; fees from the `tx` event's `fee` attribute in the chain's native denomination; `tx_types` are first message types |
 
