@@ -32,7 +32,7 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 
 | Area | What it does |
 |------|--------------|
-| Network dashboard | Latest Stellar ledger (transactions, failures, XLM fees, operation types) from Horizon; latest Starknet block from receipts (STRK fees, gas, revert rate, transaction types) |
+| Network dashboard | Latest block statistics for 40 chains: Stellar (Horizon), Starknet, 34 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types) |
 | Stellar sign-in | Challenge/response login with a Stellar wallet (Freighter `signMessage`, SEP-53), issuing a JWT |
 | Accounts | Email/password, Google OAuth, profile and profile picture |
 | AI analyst | Chat, written contract reports and natural-language-to-SQL through any OpenAI-compatible model |
@@ -75,13 +75,27 @@ All routes are under `/api`. "JWT" means `Authorization: Bearer <token>` from a 
 |--------|------|------|-------------|
 | GET | `/api/dashboards/stats?chain=stellar` | - | Latest Stellar ledger statistics (default chain) |
 | GET | `/api/dashboards/stats?chain=starknet` | - | Latest Starknet block statistics |
-| GET | `/api/dashboards/stats?chain=<other>` | - | `501 Not Implemented` with an explanation |
+| GET | `/api/dashboards/stats?chain=<id>` | - | Latest block statistics for any chain in the registry; unknown ids return `404` with the supported list, upstream failures `502` |
 | GET | `/api/dashboards` | JWT | The user's saved query and dashboard counts |
 | GET | `/api/dashboards/analytics` | - | Platform totals: users, saved queries, dashboards |
 
 Stats are computed from real chain data only. Stellar reads the whole latest ledger by following
 Horizon's paging cursor; Starknet uses `starknet_getBlockWithReceipts` for actual fees and execution
 status.
+
+Every other chain comes from the registry in `src/config/chains.json` (copied from
+[blocra-research](https://github.com/Blocra-HQ/blocra-research), embedded at build time). Each
+chain's RPCs are tried in order with a 15 s timeout; `RPC_URL_<ID>` (e.g. `RPC_URL_ETHEREUM`) is
+tried first when set. Endpoints whose head block is more than an hour old are skipped.
+
+| Type | Chains | Source | Notes |
+|------|--------|--------|-------|
+| `evm` | ethereum, base, arbitrum, optimism, polygon, bnb, avalanche, zksync, linea, scroll, blast, zora, mantle, unichain, taiko, cronos, okxchain, aurora, moonbeam, moonriver, gnosis, celo, berachain, sei, kava, metis, flare, songbird, fuse, chiliz, pulsechain, haqq, syscoin, xpla | `eth_getBlockByNumber` and `eth_getBlockReceipts` (per-transaction receipts where unsupported) | Fees are gas used x effective gas price, plus the rollup L1 fee and blob fee when the receipt reports them. Celo transactions paying fees in other tokens are counted in `non_native_fee_txs` and left out of `total_fees`. `tx_types` are envelope types; `tx_kinds` splits transfers, calls and contract creations |
+| `solana` | solana | `getSlot`, `getBlock` (confirmed) | Fees from `meta.fee`, failures from `meta.err`, senders are fee payers, `gas_used` is compute units; `tx_types` are message versions |
+| `cometbft` | axelar, celer, saga | `block`, `block_results` | Status and gas from `txs_results`; fees from the `tx` event's `fee` attribute in the chain's native denomination; `tx_types` are first message types |
+
+The response shape is the same for every chain. A figure that cannot be read exactly is `null`
+and `stats.partial` says why (for example `"receipts unavailable"`); nothing is estimated.
 
 ### AI analyst
 
@@ -145,6 +159,7 @@ Errors are JSON: `{"success": false, "message": "..."}`.
 |--------|----------|-----------|
 | Stellar Horizon | Ledger, transaction and operation data | `horizon.stellar.org`, `horizon.stellar.lobstr.co` (failover in that order), or `horizon-testnet.stellar.org` |
 | Starknet JSON-RPC | Blocks, receipts, events | `starknet-rpc.publicnode.com`, `starknet.api.onfinality.io/public`, `api.zan.top/public/starknet-mainnet` |
+| EVM, Solana and CometBFT JSON-RPC | Latest block, receipts and execution results for registry chains | Public endpoints listed per chain in `src/config/chains.json` |
 | Alchemy (optional) | EVM transaction history | Your own key |
 | AI model (optional) | Chat, reports, SQL | Any OpenAI-compatible `/chat/completions` endpoint |
 
@@ -174,6 +189,7 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `STELLAR_NETWORK` | `mainnet` | no | `mainnet` or `testnet` |
 | `STELLAR_HORIZON_URL` | none | no | Horizon server tried before the built-in ones |
 | `STARKNET_RPC_URL` | none | no | Starknet RPC tried before the built-in ones |
+| `RPC_URL_<ID>` | none | no | RPC tried before the registry's endpoints for chain `<id>`, e.g. `RPC_URL_POLYGON` |
 | `ALCHEMY_API_KEY` | none | no | Enables `/api/contract/transactions` |
 | `AI_BASE_URL` | none | no | OpenAI-compatible base URL; enables `/api/ai/*` |
 | `AI_MODEL` | none | no | Model name for the AI endpoints |
@@ -256,6 +272,8 @@ src/
   services/
     stellar.rs         Horizon client with failover and paging
     rpc.rs             Starknet JSON-RPC client with failover
+    chains.rs          chain registry and generic JSON-RPC client with failover
+  config/chains.json   chain registry (RPCs, currency, type) embedded at build time
     ai.rs              OpenAI-compatible AI client
     alchemy.rs         Alchemy transfers API
   models/              database models
