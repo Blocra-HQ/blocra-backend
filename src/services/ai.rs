@@ -25,7 +25,7 @@ transactions(transaction_hash TEXT, block_number INTEGER, sender_address TEXT, m
 contracts(address TEXT, class_hash TEXT, deployed_at_block INTEGER)";
 
 const ANALYST_PROMPT: &str = "You are BlocRA's on-chain analyst. BlocRA is a blockchain analytics \
-platform built for Stellar: users analyze Soroban contracts and smart contracts on 40 chains \
+platform built for Stellar: users analyze Soroban contracts and smart contracts on 37 chains \
 (Stellar, Starknet, Ethereum and EVM networks, Solana, Cosmos chains), publish reports to a registry \
 contract on Stellar, write SQL over blocks, transactions and contracts, and build dashboards. Answer concisely and \
 concretely. Only state numbers that appear in the data you are given; if something isn't in the \
@@ -130,6 +130,13 @@ impl AiService {
         let body: Value = resp.json().await.map_err(|e| AiError::Upstream(e.to_string()))?;
         if !status.is_success() {
             let msg = body["error"]["message"].as_str().unwrap_or("unknown error");
+            // Ollama cloud models (gpt-oss:120b-cloud) need a one-time `ollama signin`.
+            if status == reqwest::StatusCode::UNAUTHORIZED && self.model.ends_with("-cloud") {
+                return Err(AiError::Upstream(format!(
+                    "{status}: {msg}. Run `ollama signin` on the AI host to use {}",
+                    self.model
+                )));
+            }
             return Err(AiError::Upstream(format!("{status}: {msg}")));
         }
         body["choices"][0]["message"]["content"]
