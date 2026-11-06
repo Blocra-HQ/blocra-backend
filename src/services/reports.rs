@@ -362,6 +362,8 @@ pub async fn traction_report(
     Ok(json!({
         "version": 1,
         "type": "traction",
+        "method_version": crate::services::attestation::METHOD_VERSION,
+        "chain": "stellar",
         "subject": { "id": subject, "kind": kind, "label": label(&subject, &kind) },
         "network": stellar.network,
         "generated_at": chrono::Utc::now().to_rfc3339(),

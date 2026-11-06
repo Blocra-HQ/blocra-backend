@@ -157,6 +157,15 @@ sentences over those figures; nothing is estimated or written by a model.
 |--------|------|------|-------------|
 | GET | `/api/reports/traction?subject=<id>&days=7` | - | The report (`days` 1-90). `404` when the subject has no recorded activity |
 | GET | `/api/reports/subjects?kind=contract\|asset&days=7&limit=20` | - | Most active contracts or assets, for pickers |
+| GET | `/api/reports/traction?...&signed=true` | - | The report signed by BlocRA: `{signed: {report_json, attestation}}`; `503` without `BLOCRA_SIGNING_SECRET` |
+| GET | `/api/attestation/key` | - | The signing public key (Stellar `G...`), algorithm, method version and supported chains |
+
+**Signed reports.** With `signed=true` the report is returned as `report_json` (its exact compact
+JSON) plus an attestation: an Ed25519 signature over those bytes by `BLOCRA_SIGNING_SECRET`, the
+signer's public key, the payload's sha256 (what the on-chain registry records) and the methodology
+version (`traction/1`). Verifiers check the signature over the string itself, so no re-serialisation
+is involved; the [blocra CLI](https://github.com/Blocra-HQ/blocra-cli) does this with `blocra verify`.
+A `chain` parameter (default `stellar`) is accepted; other chains answer `400` until supported.
 
 | Section | Contents |
 |---------|----------|
@@ -281,6 +290,7 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `ANALYTICS_STELLAR_BACKFILL` | `30` | no | Ledgers backfilled on first start |
 | `ANALYTICS_TX_RETENTION_HOURS` | `24` | no | How long Stellar transactions and operations are kept |
 | `ANALYTICS_BLOCK_RETENTION_DAYS` | `30` | no | How long blocks and dashboard history are kept |
+| `BLOCRA_SIGNING_SECRET` | none | no | Stellar secret seed (`S...`) BlocRA signs traction reports with; enables `signed=true` and `/api/attestation/key` |
 | `RATE_LIMIT_MAX_REQUESTS` | `1000` | no | Requests allowed per client IP per window (`429` with `Retry-After` beyond it; `/api/health` is exempt) |
 | `RATE_LIMIT_WINDOW_SECS` | `900` | no | Rate-limit window in seconds |
 | `TRUST_PROXY` | unset | no | Set to `1` behind a reverse proxy (Render, nginx) so rate limits use the client IP from `X-Forwarded-For` |
@@ -357,6 +367,7 @@ src/
     collector.rs       background collection of every Stellar ledger
     analytics.rs       analytics store (blocks, transactions, operations, daily activity) and read-only SQL
     reports.rs         traction reports for Soroban contracts and assets
+    attestation.rs     Ed25519 signing of reports (BlocRA attestations)
     scval.rs           XDR decoding of contract-call parameters (contract id, function)
     chains.rs          chain registry and generic JSON-RPC client for the other chains
     starknet.rs        Starknet JSON-RPC client (Starknet dashboard)

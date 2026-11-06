@@ -7,3 +7,4 @@ pub mod analytics;
 pub mod collector;
 pub mod scval;
 pub mod reports;
+pub mod attestation;
