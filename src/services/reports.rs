@@ -186,7 +186,7 @@ pub async fn traction_report(
         .iter()
         .take(5)
         .map(|(acc, c, peak)| {
-            json!({ "account": acc, "calls": c, "share_pct": (*c as f64 / total_calls * 1000.0).round() / 10.0,
+            json!({ "account": acc, "calls": c, "share_pct": (*c as f64 / total_calls * 10000.0).round() / 100.0,
                     "bot_like": *peak >= BOT_CALLS_PER_DAY })
         })
         .collect();
@@ -241,7 +241,7 @@ pub async fn traction_report(
     let (ledgers, l_from, l_to, t_from, t_to): (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
         sqlx::query_as(
             "SELECT SUM(ledgers), MIN(first_ledger), MAX(last_ledger), MIN(first_ts), MAX(last_ts)
-             FROM collected_days WHERE day BETWEEN ? AND ?",
+             FROM collected_days WHERE day BETWEEN ? AND ? AND first_ledger IS NOT NULL",
         )
         .bind(period.from)
         .bind(period.to)
@@ -252,7 +252,7 @@ pub async fn traction_report(
         (Some(a), Some(b)) => b - a + 1,
         _ => 0,
     };
-    let completeness = if span_ledgers > 0 { ledgers as f64 / span_ledgers as f64 * 100.0 } else { 0.0 };
+    let completeness = if span_ledgers > 0 { (ledgers as f64 / span_ledgers as f64 * 100.0).min(100.0) } else { 0.0 };
     let covered_days = match (t_from, t_to) {
         (Some(a), Some(b)) => (b - a) as f64 / 86_400.0,
         _ => 0.0,
@@ -272,6 +272,7 @@ pub async fn traction_report(
     });
 
     // Rule-based findings over the measured figures.
+    let unit = if kind == "contract" { "calls" } else { "payments" };
     let mut findings: Vec<String> = Vec::new();
     if let (Some(p), Value::Number(ch)) = (&prev, &kpis["active_accounts"]["change_pct"]) {
         let ch = ch.as_f64().unwrap_or(0.0);
@@ -285,13 +286,13 @@ pub async fn traction_report(
     }
     if top10_share >= 50.0 && cur.active > 10 {
         findings.push(format!(
-            "Activity is concentrated: the top 10 of {} accounts made {top10_share}% of calls.",
+            "Activity is concentrated: the top 10 of {} accounts made {top10_share}% of {unit}.",
             cur.active
         ));
     }
     if !bots.is_empty() {
         findings.push(format!(
-            "{} account{} made ≥{BOT_CALLS_PER_DAY} calls on a single day (automated); together {bot_share}% of all calls.",
+            "{} account{} made ≥{BOT_CALLS_PER_DAY} {unit} on a single day (automated); together {bot_share}% of all {unit}.",
             bots.len(),
             if bots.len() == 1 { "" } else { "s" }
         ));
@@ -305,7 +306,7 @@ pub async fn traction_report(
             "in line with"
         };
         findings.push(format!(
-            "{failed_pct:.1}% of calls failed, {rel} the {m:.1}% median of comparable {}s.",
+            "{failed_pct:.1}% of {unit} failed, {rel} the {m:.1}% median of comparable {}s.",
             if kind == "contract" { "contract" } else { "asset" }
         ));
     }
@@ -325,9 +326,13 @@ pub async fn traction_report(
         ));
     }
     if !full_period {
+        let held = if covered_days < 1.0 {
+            format!("{:.1} hours", covered_days * 24.0)
+        } else {
+            format!("{covered_days:.1} days")
+        };
         findings.push(format!(
-            "Partial data: BlocRA holds {:.1} of the {days} days ({:.1}% of ledgers in that span). Figures cover only the collected time.",
-            covered_days, completeness
+            "Partial data: BlocRA holds {held} of the {days}-day period ({completeness:.1}% of ledgers in that span). Figures cover only the collected time."
         ));
     }
 
@@ -363,7 +368,8 @@ pub async fn traction_report(
             "ledgers_collected": ledgers,
             "ledger_from": l_from, "ledger_to": l_to,
             "completeness_pct": (completeness * 10.0).round() / 10.0,
-            "days_covered": (covered_days * 10.0).round() / 10.0,
+            "days_covered": (covered_days * 100.0).round() / 100.0,
+            "hours_covered": (covered_days * 240.0).round() / 10.0,
             "expected_ledgers": (LEDGERS_PER_DAY * days as f64).round(),
             "full_period": full_period
         },
