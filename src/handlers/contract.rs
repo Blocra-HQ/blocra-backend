@@ -1,4 +1,4 @@
-use crate::{db::DbPool, models::*, utils::jwt, errors::AppError, services::rpc::RpcService};
+use crate::{db::DbPool, models::*, utils::jwt, errors::AppError};
 use actix_web::HttpRequest;
 use uuid::Uuid;
 use serde_json::{json, Value};
@@ -40,82 +40,7 @@ pub async fn get_query(pool: &DbPool, req: &HttpRequest, id: &str) -> Result<Con
 }
 
 // RPC-based contract event fetching
-pub async fn get_contract_events(rpc: &RpcService, payload: Value) -> Result<Value, AppError> {
-    let contract_address = payload.get("contractAddress")
-        .and_then(|v| v.as_str())
-        .ok_or(AppError::BadRequest("contractAddress required".to_string()))?;
-
-    let from_date = payload.get("fromDate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp() as u64);
-
-    let to_date = payload.get("toDate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp() as u64);
-
-    let latest = rpc.get_block_number().await?;
-    
-    let from_block = if let Some(ts) = from_date {
-        rpc.find_block_by_timestamp(ts).await?
-    } else {
-        // UNLIMITED MODE: Start from block 0 (genesis) for complete historical analysis
-        0
-    };
-
-    let to_block = if let Some(ts) = to_date {
-        rpc.find_block_by_timestamp(ts).await?
-    } else {
-        latest
-    };
-
-    println!("🚀 UNLIMITED MODE: Fetching events from block {} to {} ({} blocks)", from_block, to_block, to_block - from_block);
-
-    let events = rpc.get_events(contract_address, from_block, to_block).await?;
-    
-    println!("✅ Fetched {} events", events.len());
-
-    Ok(json!({
-        "success": true,
-        "data": {
-            "events": events,
-            "fromBlock": from_block,
-            "toBlock": to_block,
-            "totalEvents": events.len()
-        }
-    }))
-}
-
 // RPC-based contract analysis
-pub async fn analyze_contract(rpc: &RpcService, payload: Value) -> Result<Value, AppError> {
-    let contract_address = payload.get("contractAddress")
-        .and_then(|v| v.as_str())
-        .ok_or(AppError::BadRequest("contractAddress required".to_string()))?;
-
-    // Validate contract address format
-    if !contract_address.starts_with("0x") || contract_address.len() != 66 {
-        return Err(AppError::BadRequest("Invalid contract address format".to_string()));
-    }
-
-    let from_date = payload.get("fromDate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp() as u64);
-
-    let to_date = payload.get("toDate")
-        .and_then(|v| v.as_str())
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.timestamp() as u64);
-
-    let analysis = rpc.analyze_contract(contract_address, from_date, to_date).await?;
-
-    Ok(json!({
-        "success": true,
-        "data": analysis
-    }))
-}
-
 // Save contract query
 pub async fn save_contract_query(pool: &DbPool, req: &HttpRequest, payload: Value) -> Result<Value, AppError> {
     let user_id = jwt::extract_user_id(req)?;

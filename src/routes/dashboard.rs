@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse, Responder};
-use crate::{handlers::dashboard as dashboard_handler, db::DbPool, services::rpc::RpcService, services::stellar::StellarService, services::chains::{self, ChainRpc}, services::analytics::{self, Analytics}, services::collector};
+use crate::{handlers::dashboard as dashboard_handler, db::DbPool, services::starknet::StarknetRpc, services::stellar::StellarService, services::chains::{self, ChainRpc}, services::analytics::{self, Analytics}, services::collector};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -20,7 +20,7 @@ const FRESH_SECS: i64 = 8;
 const STELLAR_STALE_SECS: i64 = 60;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    let rpc_service = web::Data::new(RpcService::new());
+    let rpc_service = web::Data::new(StarknetRpc::new());
     let stellar_service = web::Data::new(StellarService::from_env());
     let chain_rpc = web::Data::new(ChainRpc::new());
 
@@ -57,7 +57,7 @@ async fn get_analytics(pool: web::Data<DbPool>) -> impl Responder {
 }
 
 async fn get_blockchain_stats(
-    rpc: web::Data<RpcService>,
+    rpc: web::Data<StarknetRpc>,
     stellar: web::Data<StellarService>,
     chain_rpc: web::Data<ChainRpc>,
     store: web::Data<Analytics>,

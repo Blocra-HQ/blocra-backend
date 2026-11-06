@@ -7,8 +7,14 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 The API behind [BlocRA](https://github.com/Blocra-HQ), a blockchain analytics platform built for Stellar.
-It serves live network statistics, contract analysis, saved queries and dashboards, Stellar wallet
-sign-in, and an AI analyst, to the [BlocRA web app](https://github.com/Blocra-HQ/blocra-frontend).
+
+At its core is a **Stellar data pipeline**: a collector reads every mainnet ledger from Horizon and
+stores it, with its transactions, operations and decoded Soroban contract calls, in an analytics
+database. On top of that the API serves the network dashboard and its history, read-only SQL for the
+Query Editor and Dashboard Builder, and **verifiable traction reports** for Soroban contracts and
+Stellar assets. It also handles Stellar wallet sign-in (SEP-53), accounts, saved queries and
+dashboards, and the AI analyst. Latest-block statistics for 36 other chains (Starknet, EVM networks,
+Solana, Cosmos) come from public RPCs.
 
 Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 
@@ -41,7 +47,7 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 | AI analyst | Chat, written contract reports and natural-language-to-SQL through any OpenAI-compatible model |
 | Saved queries | Store, list and reuse contract queries |
 | Dashboard builder | User dashboards with widgets, positions and chart-type suggestions |
-| Contract analysis | Starknet contract events and activity; EVM contract transaction history through Alchemy |
+| Contract queries | Saved contract-analysis queries per user; EVM contract transaction history through Alchemy (optional) |
 | Admin | Platform overview, user list, per-user activity and query logs |
 
 ## API reference
@@ -197,15 +203,16 @@ Without `AI_BASE_URL` and `AI_MODEL` these answer `503`. Provider failures answe
 | PUT / DELETE | `/api/dashboard-builder/widgets/{id}` | JWT | Move/resize or remove a widget |
 | GET | `/api/dashboard-builder/suggest/{query_id}` | JWT | Suggested chart type for a query |
 
-### Contract analysis
+### Contract queries
+
+Contract analysis itself runs in the web app (Soroban events from Stellar RPC `getEvents`); these
+endpoints store its queries.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/api/contracts/query` | JWT | Run and record a contract query |
 | GET | `/api/contracts/queries` | JWT | The user's contract queries |
 | GET | `/api/contracts/queries/{id}` | JWT (owner) | One of your contract queries (`404` for others') |
-| POST | `/api/contracts/events` | - | Starknet events for a contract and block range |
-| POST | `/api/contracts/analyze` | - | Starknet contract activity summary |
 | POST | `/api/contracts/save-query` | JWT | Save a query |
 | GET | `/api/contracts/saved-queries` | JWT | Saved queries |
 | POST | `/api/contract/transactions` | - | EVM contract transactions via Alchemy (Base, Ethereum, Arbitrum, Optimism, Polygon); `503` without `ALCHEMY_API_KEY` |
@@ -227,8 +234,8 @@ Errors are JSON: `{"success": false, "message": "..."}`.
 
 | Source | Used for | Endpoints |
 |--------|----------|-----------|
-| Stellar Horizon | Ledger, transaction and operation data | `horizon.stellar.org`, `horizon.stellar.lobstr.co` (failover in that order), or `horizon-testnet.stellar.org` |
-| Starknet JSON-RPC | Blocks, receipts, events | `starknet-rpc.publicnode.com`, `starknet.api.onfinality.io/public`, `api.zan.top/public/starknet-mainnet` |
+| Stellar Horizon | Every ledger with its transactions and operations (collector), asset holders and supply (reports) | `horizon.stellar.org`, `horizon.stellar.lobstr.co` (failover in that order), or `horizon-testnet.stellar.org` |
+| Starknet JSON-RPC | Starknet dashboard: latest block with receipts | `starknet-rpc.publicnode.com`, `starknet.api.onfinality.io/public`, `api.zan.top/public/starknet-mainnet` |
 | EVM, Solana and CometBFT JSON-RPC | Latest block, receipts and execution results for registry chains | Public endpoints listed per chain in `src/config/chains.json` |
 | Alchemy (optional) | EVM transaction history | Your own key |
 | AI model (optional) | Chat, reports, SQL | Any OpenAI-compatible `/chat/completions` endpoint |
@@ -343,15 +350,19 @@ src/
   errors.rs            AppError and JSON error responses
   auth/
     stellar_wallet.rs  Stellar challenge/verify sign-in (SEP-53 signatures)
-  routes/              HTTP routes per area (auth, dashboard, ai, contract, query, admin, ...)
+  routes/              HTTP routes per area (auth, dashboard, sql, reports, ai, contract, query, admin, ...)
   handlers/            request logic and dashboard summaries
   services/
     stellar.rs         Horizon client with failover and paging
-    rpc.rs             Starknet JSON-RPC client with failover
-    chains.rs          chain registry and generic JSON-RPC client with failover
+    collector.rs       background collection of every Stellar ledger
+    analytics.rs       analytics store (blocks, transactions, operations, daily activity) and read-only SQL
+    reports.rs         traction reports for Soroban contracts and assets
+    scval.rs           XDR decoding of contract-call parameters (contract id, function)
+    chains.rs          chain registry and generic JSON-RPC client for the other chains
+    starknet.rs        Starknet JSON-RPC client (Starknet dashboard)
+    ai.rs              OpenAI-compatible AI client (gpt-oss by default)
+    alchemy.rs         Alchemy transfers API (optional)
   config/chains.json   chain registry (RPCs, currency, type) embedded at build time
-    ai.rs              OpenAI-compatible AI client
-    alchemy.rs         Alchemy transfers API
   models/              database models
   middleware/          request logging, rate-limit hook
   utils/jwt.rs         token creation and verification

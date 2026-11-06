@@ -1,4 +1,4 @@
-use crate::{db::DbPool, utils::jwt, errors::AppError, services::rpc::RpcService};
+use crate::{db::DbPool, utils::jwt, errors::AppError, services::starknet::StarknetRpc};
 use crate::services::stellar::{HorizonOperation, HorizonTransaction, LedgerInfo, StellarService};
 use crate::services::chains::{ChainInfo, ChainRpc, DEFAULT_TIMEOUT};
 use actix_web::HttpRequest;
@@ -35,7 +35,7 @@ pub async fn get_analytics(pool: &DbPool) -> Result<Value, AppError> {
 /// Stats for the latest Starknet block, all taken from the block's receipts.
 /// Nothing is estimated: fees are the receipts' actual fees, success and
 /// failure come from execution_status, gas from execution_resources.
-pub async fn get_blockchain_stats(rpc: &RpcService) -> Result<Value, AppError> {
+pub async fn get_blockchain_stats(rpc: &StarknetRpc) -> Result<Value, AppError> {
     let block_number = rpc.get_block_number().await?;
     let block = rpc.get_block_with_receipts(block_number).await?;
     Ok(summarize_block(block_number, &block))

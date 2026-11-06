@@ -1,17 +1,13 @@
 use actix_web::{web, HttpResponse, Responder};
-use crate::{handlers::contract as contract_handler, db::DbPool, services::rpc::RpcService};
+use crate::{handlers::contract as contract_handler, db::DbPool};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    let rpc_service = web::Data::new(RpcService::new());
     
     cfg.service(
         web::scope("/contracts")
-            .app_data(rpc_service)
             .route("/query", web::post().to(query_contract))
             .route("/queries", web::get().to(list_queries))
             .route("/queries/{id}", web::get().to(get_query))
-            .route("/events", web::post().to(get_events))
-            .route("/analyze", web::post().to(analyze_contract))
             .route("/save-query", web::post().to(save_query))
             .route("/saved-queries", web::get().to(get_saved_queries))
     );
@@ -49,32 +45,6 @@ async fn get_query(
     match contract_handler::get_query(&pool, &req, &id).await {
         Ok(query) => HttpResponse::Ok().json(query),
         Err(e) => actix_web::ResponseError::error_response(&e),
-    }
-}
-
-async fn get_events(
-    rpc: web::Data<RpcService>,
-    payload: web::Json<serde_json::Value>,
-) -> impl Responder {
-    match contract_handler::get_contract_events(&rpc, payload.into_inner()).await {
-        Ok(events) => HttpResponse::Ok().json(events),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "message": e.to_string()
-        }))
-    }
-}
-
-async fn analyze_contract(
-    rpc: web::Data<RpcService>,
-    payload: web::Json<serde_json::Value>,
-) -> impl Responder {
-    match contract_handler::analyze_contract(&rpc, payload.into_inner()).await {
-        Ok(analysis) => HttpResponse::Ok().json(analysis),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "message": e.to_string()
-        }))
     }
 }
 

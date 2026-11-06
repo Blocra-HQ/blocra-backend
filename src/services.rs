@@ -1,4 +1,4 @@
-pub mod rpc;
+pub mod starknet;
 pub mod alchemy;
 pub mod ai;
 pub mod stellar;
