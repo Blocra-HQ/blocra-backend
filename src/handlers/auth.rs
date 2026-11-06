@@ -238,6 +238,82 @@ async fn verify_google_token(token: &str) -> Result<Value, AppError> {
     Ok(user_info)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordPayload {
+    pub current_password: Option<String>,
+    pub new_password: String,
+}
+
+/// Changes (or, for wallet/Google accounts without one, sets) the password.
+/// An existing password must be confirmed first.
+pub async fn change_password(pool: &DbPool, req: &HttpRequest, payload: ChangePasswordPayload) -> Result<(), AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Account not found".to_string()))?;
+    if let Some(existing) = &user.password_hash {
+        let current = payload.current_password.as_deref().unwrap_or_default();
+        if !verify(current, existing).unwrap_or(false) {
+            return Err(AppError::Unauthorized("Current password is incorrect".to_string()));
+        }
+    }
+    if payload.new_password.len() < 6 {
+        return Err(AppError::BadRequest("Password must be at least 6 characters".to_string()));
+    }
+    let new_hash = hash(&payload.new_password, DEFAULT_COST)
+        .map_err(|e| AppError::BadRequest(format!("Failed to hash password: {}", e)))?;
+    sqlx::query("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(new_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteAccountPayload {
+    pub password: Option<String>,
+}
+
+/// Deletes the signed-in account with its saved queries and dashboards.
+/// Accounts with a password must confirm it.
+pub async fn delete_account(pool: &DbPool, req: &HttpRequest, payload: DeleteAccountPayload) -> Result<(), AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Account not found".to_string()))?;
+    if let Some(existing) = &user.password_hash {
+        let password = payload.password.as_deref().unwrap_or_default();
+        if !verify(password, existing).unwrap_or(false) {
+            return Err(AppError::Unauthorized("Password is incorrect".to_string()));
+        }
+    }
+    // SQLite foreign keys are not enforced here, and contract_queries.user_id
+    // is TEXT, so remove the user's rows explicitly.
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM contract_queries WHERE user_id = ?")
+        .bind(user_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM dashboard_widgets WHERE dashboard_id IN (SELECT id FROM dashboards WHERE user_id = ?)")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    for table in ["dashboards", "widget_preferences", "activity_logs", "query_logs", "report_logs"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE user_id = ?"))
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM users WHERE id = ?").bind(user_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Signs in (or registers) the Stellar account that `auth::stellar_wallet`
 /// has just verified a signed challenge for.
 pub async fn stellar_sign_in(pool: &DbPool, account: &str) -> Result<AuthResponse, AppError> {

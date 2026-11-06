@@ -18,6 +18,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/profile", web::put().to(update_profile))
             .route("/upload-profile-image", web::post().to(upload_profile_image))
             .route("/logout", web::post().to(logout))
+            .route("/password", web::put().to(change_password))
+            .route("/account", web::delete().to(delete_account))
             .route("/oauth/config", web::get().to(get_oauth_config))
     );
 }
@@ -164,6 +166,29 @@ async fn update_profile(
             "success": false,
             "message": e.to_string()
         }))
+    }
+}
+
+async fn change_password(
+    pool: web::Data<DbPool>,
+    req: HttpRequest,
+    payload: web::Json<auth_handler::ChangePasswordPayload>,
+) -> HttpResponse {
+    match auth_handler::change_password(&pool, &req, payload.into_inner()).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Password updated" })),
+        Err(e) => e.error_response(),
+    }
+}
+
+async fn delete_account(
+    pool: web::Data<DbPool>,
+    req: HttpRequest,
+    payload: Option<web::Json<auth_handler::DeleteAccountPayload>>,
+) -> HttpResponse {
+    let payload = payload.map(|p| p.into_inner()).unwrap_or(auth_handler::DeleteAccountPayload { password: None });
+    match auth_handler::delete_account(&pool, &req, payload).await {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({ "success": true, "message": "Account deleted" })),
+        Err(e) => e.error_response(),
     }
 }
 
