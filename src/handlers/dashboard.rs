@@ -785,6 +785,7 @@ mod tests {
         let tx = |ok: bool, src: &str, fee: &str| HorizonTransaction {
             hash: "t".into(), paging_token: "1".into(), ledger: 9, created_at: String::new(), source_account: src.into(),
             fee_account: None, fee_charged: Some(fee.into()), max_fee: None, operation_count: 1, successful: ok,
+            envelope_xdr: None,
         };
         let op = |kind: &str| HorizonOperation {
             id: "o".into(), paging_token: "1".into(), transaction_hash: "t".into(), source_account: "G".into(),

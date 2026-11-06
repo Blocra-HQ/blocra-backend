@@ -66,6 +66,8 @@ struct TractionQuery {
     days: Option<i64>,
     chain: Option<String>,
     signed: Option<bool>,
+    /// Comma-separated relayer accounts the project runs.
+    relayers: Option<String>,
 }
 
 /// GET /api/reports/traction?subject=C...|XLM|CODE:ISSUER&days=7[&chain=stellar][&signed=true]
@@ -85,9 +87,15 @@ async fn traction(
             "message": format!("Traction reports are not available for '{chain}' yet. Supported: {}.", REPORT_CHAINS.join(", "))
         }));
     }
-    let report = match reports::traction_report(&store, &stellar, &q.subject, q.days.unwrap_or(7)).await {
+    let relayers: Vec<String> = q
+        .relayers
+        .as_deref()
+        .map(|r| r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    let report = match reports::traction_report(&store, &stellar, &q.subject, q.days.unwrap_or(7), &relayers).await {
         Ok(r) => r,
         Err(AppError::NotFound(m)) => return HttpResponse::NotFound().json(json!({ "success": false, "message": m })),
+        Err(AppError::BadRequest(m)) => return HttpResponse::BadRequest().json(json!({ "success": false, "message": m })),
         Err(e) => return e.error_response(),
     };
     if q.signed.unwrap_or(false) {

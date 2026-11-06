@@ -8,3 +8,4 @@ pub mod collector;
 pub mod scval;
 pub mod reports;
 pub mod attestation;
+pub mod soroban_auth;

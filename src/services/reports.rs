@@ -53,14 +53,34 @@ struct Totals {
     failed: i64,
     volume: f64,
     self_calls: i64,
+    relayed_calls: i64,
+    smart_wallets: i64,
 }
 
-async fn totals(db: &SqlitePool, subject: &str, p: Period<'_>) -> Result<Totals, sqlx::Error> {
-    type TotalsRow = (i64, Option<i64>, Option<i64>, Option<f64>, Option<i64>);
-    let (active, calls, failed, volume, self_calls): TotalsRow = sqlx::query_as(
-        "SELECT COUNT(DISTINCT account), SUM(calls), SUM(failed), SUM(volume), SUM(self_calls)
-         FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?",
-    )
+/// A Stellar account (G...) or contract (C...) id: base32, 56 characters.
+pub fn is_strkey(s: &str) -> bool {
+    s.len() == 56
+        && matches!(s.as_bytes()[0], b'G' | b'C')
+        && s.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b))
+}
+
+/// " AND account NOT IN ('G...', ...)" for declared relayers. Ids are
+/// validated as strkeys first, so inlining them is safe.
+fn exclusion(relayers: &[String]) -> String {
+    if relayers.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = relayers.iter().map(|r| format!("'{r}'")).collect();
+    format!(" AND account NOT IN ({})", list.join(", "))
+}
+
+async fn totals(db: &SqlitePool, subject: &str, p: Period<'_>, excl: &str) -> Result<Totals, sqlx::Error> {
+    type TotalsRow = (i64, Option<i64>, Option<i64>, Option<f64>, Option<i64>, Option<i64>, i64);
+    let (active, calls, failed, volume, self_calls, relayed_calls, smart_wallets): TotalsRow = sqlx::query_as(&format!(
+        "SELECT COUNT(DISTINCT account), SUM(calls), SUM(failed), SUM(volume), SUM(self_calls), SUM(relayed_calls),
+                COUNT(DISTINCT CASE WHEN account LIKE 'C%' THEN account END)
+         FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?{excl}",
+    ))
     .bind(subject)
     .bind(p.from)
     .bind(p.to)
@@ -72,6 +92,8 @@ async fn totals(db: &SqlitePool, subject: &str, p: Period<'_>) -> Result<Totals,
         failed: failed.unwrap_or(0),
         volume: volume.unwrap_or(0.0),
         self_calls: self_calls.unwrap_or(0),
+        relayed_calls: relayed_calls.unwrap_or(0),
+        smart_wallets,
     })
 }
 
@@ -102,8 +124,17 @@ pub async fn traction_report(
     stellar: &StellarService,
     subject_input: &str,
     days: i64,
+    relayers: &[String],
 ) -> Result<Value, AppError> {
     let db = store.reader();
+    let relayers: Vec<String> = relayers.iter().map(|r| r.trim().to_ascii_uppercase()).filter(|r| !r.is_empty()).collect();
+    if let Some(bad) = relayers.iter().find(|r| !is_strkey(r)) {
+        return Err(AppError::BadRequest(format!("'{bad}' is not a Stellar account or contract id")));
+    }
+    if relayers.len() > 20 {
+        return Err(AppError::BadRequest("Declare at most 20 relayer accounts".into()));
+    }
+    let excl = exclusion(&relayers);
     let subject = normalize_subject(subject_input);
     let days = days.clamp(1, 90);
 
@@ -126,14 +157,33 @@ pub async fn traction_report(
     let previous = Period { from: &prev_from, to: &prev_to };
     let has_previous = first_day.as_str() <= prev_to.as_str();
 
-    let cur = totals(db, &subject, period).await?;
-    let prev = if has_previous { Some(totals(db, &subject, previous).await?) } else { None };
+    let cur = totals(db, &subject, period, &excl).await?;
+    let prev = if has_previous { Some(totals(db, &subject, previous, &excl).await?) } else { None };
+
+    // Calls sent by the project's declared relayers that carried no user
+    // authorization: their users can't be told apart, so they're reported
+    // separately instead of as one hyperactive "user".
+    let (relayer_calls, relayer_accounts): (Option<i64>, i64) = if relayers.is_empty() {
+        (None, 0)
+    } else {
+        let list: Vec<String> = relayers.iter().map(|r| format!("'{r}'")).collect();
+        sqlx::query_as(&format!(
+            "SELECT SUM(calls), COUNT(DISTINCT account) FROM activity_daily
+             WHERE subject = ? AND day BETWEEN ? AND ? AND account IN ({})",
+            list.join(", ")
+        ))
+        .bind(&subject)
+        .bind(period.from)
+        .bind(period.to)
+        .fetch_one(db)
+        .await?
+    };
 
     // New accounts: first seen (in all collected data) during the period.
-    let new_accounts: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM (SELECT account, MIN(day) AS first FROM activity_daily WHERE subject = ? GROUP BY account)
+    let new_accounts: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM (SELECT account, MIN(day) AS first FROM activity_daily WHERE subject = ?{excl} GROUP BY account)
          WHERE first BETWEEN ? AND ?",
-    )
+    ))
     .bind(&subject)
     .bind(period.from)
     .bind(period.to)
@@ -143,12 +193,12 @@ pub async fn traction_report(
 
     // Returning: active in both periods.
     let returning: i64 = if has_previous {
-        sqlx::query_scalar(
+        sqlx::query_scalar(&format!(
             "SELECT COUNT(*) FROM (
-               SELECT account FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?
+               SELECT account FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?{excl}
                INTERSECT
-               SELECT account FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?)",
-        )
+               SELECT account FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?{excl})",
+        ))
         .bind(&subject)
         .bind(period.from)
         .bind(period.to)
@@ -162,10 +212,10 @@ pub async fn traction_report(
     };
 
     // Daily series.
-    let daily_rows: Vec<(String, i64, i64, i64, f64)> = sqlx::query_as(
+    let daily_rows: Vec<(String, i64, i64, i64, f64)> = sqlx::query_as(&format!(
         "SELECT day, COUNT(DISTINCT account), SUM(calls), SUM(failed), SUM(volume)
-         FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ? GROUP BY day ORDER BY day",
-    )
+         FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?{excl} GROUP BY day ORDER BY day",
+    ))
     .bind(&subject)
     .bind(period.from)
     .bind(period.to)
@@ -177,10 +227,10 @@ pub async fn traction_report(
         .collect();
 
     // Concentration: who generates the activity.
-    let per_account: Vec<(String, i64, i64)> = sqlx::query_as(
+    let per_account: Vec<(String, i64, i64)> = sqlx::query_as(&format!(
         "SELECT account, SUM(calls) AS c, MAX(calls) AS peak FROM activity_daily
-         WHERE subject = ? AND day BETWEEN ? AND ? GROUP BY account ORDER BY c DESC",
-    )
+         WHERE subject = ? AND day BETWEEN ? AND ?{excl} GROUP BY account ORDER BY c DESC",
+    ))
     .bind(&subject)
     .bind(period.from)
     .bind(period.to)
@@ -200,6 +250,7 @@ pub async fn traction_report(
         .collect();
     let top10_share = (top10 as f64 / total_calls * 1000.0).round() / 10.0;
     let self_share = (cur.self_calls as f64 / total_calls * 1000.0).round() / 10.0;
+    let relayed_share = (cur.relayed_calls as f64 / total_calls * 1000.0).round() / 10.0;
     let bot_share = (bot_calls as f64 / total_calls * 1000.0).round() / 10.0;
 
     // Functions (contracts only).
@@ -307,6 +358,22 @@ pub async fn traction_report(
             if bots.len() == 1 { "" } else { "s" }
         ));
     }
+    if kind == "contract" && relayed_share >= 5.0 {
+        findings.push(format!(
+            "{relayed_share}% of calls were submitted by a relayer or sponsor on the user's behalf; each is counted for the account that authorized it, not the relayer."
+        ));
+    }
+    if kind == "contract" && cur.smart_wallets > 0 {
+        findings.push(format!(
+            "{} of {} active accounts are smart wallets (contract accounts).",
+            cur.smart_wallets, cur.active
+        ));
+    }
+    if let Some(c) = relayer_calls.filter(|c| *c > 0) {
+        findings.push(format!(
+            "{c} calls came from the project's declared relayers without user authorization; their users can't be identified on-chain and are excluded from account counts."
+        ));
+    }
     if kind == "asset" && self_share >= 10.0 {
         findings.push(format!(
             "{self_share}% of payments were sent to the sender's own account (arbitrage loops); they are excluded from volume."
@@ -377,7 +444,11 @@ pub async fn traction_report(
         "quality": { "top10_share_pct": top10_share, "bot_like_accounts": bots.len(), "bot_like_share_pct": bot_share,
                      "bot_threshold_calls_per_day": BOT_CALLS_PER_DAY, "top_accounts": top_accounts,
                      "self_payments": if kind == "asset" { json!(cur.self_calls) } else { Value::Null },
-                     "self_payment_share_pct": if kind == "asset" { json!(self_share) } else { Value::Null } },
+                     "self_payment_share_pct": if kind == "asset" { json!(self_share) } else { Value::Null },
+                     "relayed_calls": if kind == "contract" { json!(cur.relayed_calls) } else { Value::Null },
+                     "relayed_share_pct": if kind == "contract" { json!(relayed_share) } else { Value::Null },
+                     "smart_wallet_accounts": if kind == "contract" { json!(cur.smart_wallets) } else { Value::Null } },
+        "declared_relayers": { "accounts": relayers, "active": relayer_accounts, "calls_without_user_auth": relayer_calls },
         "functions": functions,
         "ecosystem": { "rank": position, "of": peers.len(), "percentile": percentile,
                        "median_failed_pct": median_fail.map(|m| (m * 10.0).round() / 10.0), "metric": "active_accounts" },
@@ -411,7 +482,8 @@ fn methodology(kind: &str) -> Vec<String> {
         "Days are UTC calendar days; the latest day may be partial.".to_string(),
     ];
     if kind == "contract" {
-        m.push("A call is one invoke_host_function operation targeting the contract; the account is the operation's source. Failed calls (from failed transactions) are included in calls and counted in failed.".to_string());
+        m.push("A call is one invoke_host_function operation targeting the contract. Its account is the first account (G...) or smart wallet (C...) that signed an authorization entry for it, so calls sent through relayers, fee sponsors or fee bumps count for the user; calls without authorization entries count for the operation's source. Failed calls are included in calls and counted in failed.".to_string());
+        m.push("Declared relayers (accounts the project names as its own relayers) are left out of account counts, concentration and retention; calls they sent without user authorization are reported separately.".to_string());
     } else {
         m.push("Activity is payments and path payments of the asset; the account is the sender. Volume sums amounts of successful payments to other accounts, in the asset's units; payments to oneself (arbitrage loops) are counted as self-payments and left out of volume.".to_string());
     }
@@ -458,5 +530,17 @@ mod tests {
         assert_eq!(shift_day("2026-11-06", -6), "2026-10-31");
         assert_eq!(change_pct(120.0, 100.0), json!(20.0));
         assert_eq!(change_pct(1.0, 0.0), Value::Null);
+    }
+
+    #[test]
+    fn validates_declared_relayers() {
+        let g = "GBQ6QIHVDHFSY4CDORDELIZXRUWF72FTCRNOXUFPH7YOO3PFFMXLAVUN";
+        assert!(is_strkey(g));
+        assert!(is_strkey("CDL74RF5BLYR2YBLCCI7F5FB6TPSCLKEJUBSD2RSVWZ4YHF3VMFAIGWA"));
+        assert!(!is_strkey("G' OR 1=1 --"));
+        assert!(!is_strkey(&g.to_lowercase()));
+        assert!(!is_strkey("SBQ6QIHVDHFSY4CDORDELIZXRUWF72FTCRNOXUFPH7YOO3PFFMXLAVUN"));
+        assert_eq!(exclusion(&[]), "");
+        assert_eq!(exclusion(&[g.to_string()]), format!(" AND account NOT IN ('{g}')"));
     }
 }

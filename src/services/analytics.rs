@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS activity_daily (
     failed INTEGER NOT NULL DEFAULT 0,
     volume REAL NOT NULL DEFAULT 0,
     self_calls INTEGER NOT NULL DEFAULT 0,
+    relayed_calls INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (subject, day, account)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS activity_by_day ON activity_daily (day, kind);
@@ -166,7 +167,14 @@ pub const TABLES: &[(&str, &str, &[ColumnDoc])] = &[
             ("timestamp", "INTEGER", "Ledger close time, unix seconds"),
             ("tx_hash", "TEXT", "Transaction hash"),
             ("type", "TEXT", "payment, invoke_host_function, manage_sell_offer, path_payment_strict_send, ..."),
-            ("source", "TEXT", "Operation source account"),
+            ("source", "TEXT", "Operation source account (for relayed contract calls, the relayer)"),
+            ("contract", "TEXT", "Contract called (invoke_host_function), C..."),
+            ("function", "TEXT", "Contract function called"),
+            ("user_account", "TEXT", "Contract calls: the account that authorized the call (G... or a smart-wallet C...)"),
+            ("relayed", "INTEGER", "Contract calls: 1 if submitted by an account other than the user (relayer, sponsor)"),
+            ("asset", "TEXT", "Payments: asset moved, XLM or CODE:ISSUER"),
+            ("amount", "REAL", "Payments: amount in asset units"),
+            ("destination", "TEXT", "Payments: receiving account"),
         ],
     ),
 ];
@@ -245,10 +253,11 @@ impl Analytics {
         let rw = SqlitePoolOptions::new().max_connections(2).connect_with(rw_opts.clone()).await?;
         sqlx::raw_sql(SCHEMA).execute(&rw).await?;
         // Columns added after the first release; ignore "duplicate column".
-        for col in ["contract TEXT", "function TEXT", "asset TEXT", "amount REAL", "destination TEXT"] {
+        for col in ["contract TEXT", "function TEXT", "asset TEXT", "amount REAL", "destination TEXT", "user_account TEXT", "relayed INTEGER"] {
             let _ = sqlx::query(&format!("ALTER TABLE operations ADD COLUMN {col}")).execute(&rw).await;
         }
         let _ = sqlx::query("ALTER TABLE activity_daily ADD COLUMN self_calls INTEGER NOT NULL DEFAULT 0").execute(&rw).await;
+        let _ = sqlx::query("ALTER TABLE activity_daily ADD COLUMN relayed_calls INTEGER NOT NULL DEFAULT 0").execute(&rw).await;
         for col in ["first_ledger INTEGER", "last_ledger INTEGER", "first_ts INTEGER", "last_ts INTEGER"] {
             let _ = sqlx::query(&format!("ALTER TABLE collected_days ADD COLUMN {col}")).execute(&rw).await;
         }
@@ -301,16 +310,38 @@ impl Analytics {
             .execute(&mut *tx)
             .await?;
         }
+        // Authorization entries per transaction, decoded only for contract calls.
+        let envelopes: std::collections::HashMap<&str, &str> = txs
+            .iter()
+            .filter_map(|t| Some((t.hash.as_str(), t.envelope_xdr.as_deref()?)))
+            .collect();
         for o in ops {
             let op_ts = parse_time(&o.created_at);
             let call = o.contract_call();
+            // The user of a contract call is the first account that authorized
+            // it; without authorization entries it is the operation's source.
+            // A call whose source didn't authorize it was relayed.
+            let (user, relayed) = match &call {
+                Some(_) => {
+                    let auth = envelopes
+                        .get(o.transaction_hash.as_str())
+                        .map(|e| crate::services::soroban_auth::authorizers(e))
+                        .unwrap_or_default();
+                    match auth.first() {
+                        Some(first) => (first.clone(), !auth.contains(&o.source_account)),
+                        None => (o.source_account.clone(), false),
+                    }
+                }
+                None => (o.source_account.clone(), false),
+            };
             let asset = o.payment_asset();
             let amount = o.amount.as_deref().and_then(|a| a.parse::<f64>().ok());
             let failed = !o.transaction_successful.unwrap_or(true);
             sqlx::query(
                 "INSERT OR IGNORE INTO operations
-                 (chain, id, block_number, timestamp, tx_hash, type, source, contract, function, asset, amount, destination)
-                 VALUES ('stellar', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (chain, id, block_number, timestamp, tx_hash, type, source, contract, function, asset, amount, destination,
+                  user_account, relayed)
+                 VALUES ('stellar', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&o.id)
             .bind(ledger)
@@ -323,11 +354,13 @@ impl Analytics {
             .bind(asset.as_deref())
             .bind(if asset.is_some() { amount } else { None })
             .bind(o.to.as_deref())
+            .bind(call.as_ref().map(|_| user.as_str()))
+            .bind(call.as_ref().map(|_| relayed as i64))
             .execute(&mut *tx)
             .await?;
 
             if let Some((contract, function)) = &call {
-                add_activity(&mut tx, contract, &day, &o.source_account, "contract", failed, 0.0, false).await?;
+                add_activity(&mut tx, Activity { subject: contract, day: &day, account: &user, kind: "contract", failed, volume: 0.0, to_self: false, relayed }).await?;
                 sqlx::query(
                     "INSERT INTO function_daily (contract, day, function, calls, failed) VALUES (?, ?, ?, 1, ?)
                      ON CONFLICT (contract, day, function) DO UPDATE SET
@@ -347,7 +380,7 @@ impl Analytics {
                 let sender = o.from.as_deref().unwrap_or(&o.source_account);
                 let to_self = o.to.as_deref() == Some(sender);
                 let volume = if failed || to_self { 0.0 } else { amount.unwrap_or(0.0) };
-                add_activity(&mut tx, asset, &day, sender, "asset", failed, volume, to_self).await?;
+                add_activity(&mut tx, Activity { subject: asset, day: &day, account: sender, kind: "asset", failed, volume, to_self, relayed: false }).await?;
             }
         }
         sqlx::query(
@@ -498,31 +531,33 @@ async fn insert_block(
     Ok(inserted)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn add_activity(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    subject: &str,
-    day: &str,
-    account: &str,
-    kind: &str,
+struct Activity<'a> {
+    subject: &'a str,
+    day: &'a str,
+    account: &'a str,
+    kind: &'a str,
     failed: bool,
     volume: f64,
     to_self: bool,
-) -> Result<(), sqlx::Error> {
+    relayed: bool,
+}
+
+async fn add_activity(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, a: Activity<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO activity_daily (subject, day, account, kind, calls, failed, volume, self_calls)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?)
+        "INSERT INTO activity_daily (subject, day, account, kind, calls, failed, volume, self_calls, relayed_calls)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
          ON CONFLICT (subject, day, account) DO UPDATE SET
            calls = calls + 1, failed = failed + excluded.failed, volume = volume + excluded.volume,
-           self_calls = self_calls + excluded.self_calls",
+           self_calls = self_calls + excluded.self_calls, relayed_calls = relayed_calls + excluded.relayed_calls",
     )
-    .bind(subject)
-    .bind(day)
-    .bind(account)
-    .bind(kind)
-    .bind(failed as i64)
-    .bind(volume)
-    .bind(to_self as i64)
+    .bind(a.subject)
+    .bind(a.day)
+    .bind(a.account)
+    .bind(a.kind)
+    .bind(a.failed as i64)
+    .bind(a.volume)
+    .bind(a.to_self as i64)
+    .bind(a.relayed as i64)
     .execute(&mut **tx)
     .await?;
     Ok(())

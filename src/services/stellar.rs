@@ -73,6 +73,9 @@ pub struct HorizonTransaction {
     pub max_fee: Option<String>,
     pub operation_count: u32,
     pub successful: bool,
+    /// Base64 transaction envelope; read for Soroban authorization entries.
+    #[serde(default)]
+    pub envelope_xdr: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -172,7 +172,8 @@ A `chain` parameter (default `stellar`) is accepted; other chains answer `400` u
 | `kpis` | Active accounts, new accounts (marked unreliable when history is shorter than the period), calls or payments, failure rate, volume (assets), calls per account, each with the previous period and % change |
 | `daily` | Active accounts, calls, failures and volume per UTC day |
 | `retention` | Accounts active in both periods |
-| `quality` | Top-10 account share of calls, accounts with at least 1,000 calls on one day (automated) and their share, top 5 accounts |
+| `quality` | Top-10 account share of calls, accounts with at least 1,000 calls on one day (automated) and their share, share of calls submitted by relayers, smart-wallet accounts, top 5 accounts |
+| `declared_relayers` | Relayer accounts the project declared, and their calls without user authorization |
 | `functions` | Calls and failure rate per contract function |
 | `ecosystem` | Rank by active accounts among all contracts (or assets) active in the period, and the peers' median failure rate |
 | `asset_snapshot` | Holders and supply (accounts, contracts, pools) from Horizon at generation time |
@@ -180,7 +181,14 @@ A `chain` parameter (default `stellar`) is accepted; other chains answer `400` u
 | `methodology` | Definitions behind every figure |
 
 Contract calls are decoded from each `invoke_host_function` operation's parameters (contract address
-and function symbol, XDR in `src/services/scval.rs`). Asset activity is payments and path payments by
+and function symbol, XDR in `src/services/scval.rs`). **Each call is counted for the user who
+authorized it:** the first account (`G...`) or smart wallet (`C...`) with an `Address` credential in
+the transaction's Soroban authorization entries (`src/services/soroban_auth.rs`, using
+`stellar-xdr`; fee bumps unwrapped). Calls sent by relayers or fee sponsors therefore count for
+their users, and the report states the share of relayed calls and smart-wallet accounts. Calls with
+only source-account authorization count for the operation's source. A `relayers=G...,G...` parameter
+declares relayers a project runs that sign everything themselves; they are left out of account
+counts and their calls without user authorization are reported separately. Asset activity is payments and path payments by
 sender; volume sums successful payments.
 
 ### AI analyst
@@ -369,6 +377,7 @@ src/
     reports.rs         traction reports for Soroban contracts and assets
     attestation.rs     Ed25519 signing of reports (BlocRA attestations)
     scval.rs           XDR decoding of contract-call parameters (contract id, function)
+    soroban_auth.rs    who authorized a contract call (Soroban auth entries; relayer-aware users)
     chains.rs          chain registry and generic JSON-RPC client for the other chains
     starknet.rs        Starknet JSON-RPC client (Starknet dashboard)
     ai.rs              OpenAI-compatible AI client (gpt-oss by default)

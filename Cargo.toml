@@ -41,6 +41,7 @@ validator = { version = "0.18", features = ["derive"] }
 # Stellar wallet sign-in (Ed25519 signature checks)
 ed25519-dalek = "3"
 stellar-strkey = "1.0.0"
+stellar-xdr = { version = "30", default-features = false, features = ["std", "base64"] }
 sha2 = "0.11"
 base64 = "0.22"
 
