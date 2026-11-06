@@ -280,7 +280,6 @@ scripts/               production setup helper
 
 These are tracked for fixing:
 
-- `DELETE /api/queries/{id}` and `GET /api/queries/{id}` do not check the caller owns the query.
 - `RateLimitMiddleware` currently passes every request through; the `RATE_LIMIT_*` settings are not
   enforced.
 - `CORS_ORIGIN` accepts a single origin (or `*`).

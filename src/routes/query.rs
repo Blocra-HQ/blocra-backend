@@ -1,4 +1,4 @@
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Responder, ResponseError};
 use crate::{handlers::query as query_handler, db::DbPool};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -35,25 +35,27 @@ async fn save_query(
     }
 }
 
-async fn get_saved_query(pool: web::Data<DbPool>, id: web::Path<String>) -> impl Responder {
-    match query_handler::get_saved_query(&pool, &id).await {
+async fn get_saved_query(
+    pool: web::Data<DbPool>,
+    req: actix_web::HttpRequest,
+    id: web::Path<String>,
+) -> impl Responder {
+    match query_handler::get_saved_query(&pool, &req, &id).await {
         Ok(query) => HttpResponse::Ok().json(query),
-        Err(e) => HttpResponse::NotFound().json(serde_json::json!({
-            "success": false,
-            "message": e.to_string()
-        }))
+        Err(e) => e.error_response(),
     }
 }
 
-async fn delete_query(pool: web::Data<DbPool>, id: web::Path<String>) -> impl Responder {
-    match query_handler::delete_query(&pool, &id).await {
+async fn delete_query(
+    pool: web::Data<DbPool>,
+    req: actix_web::HttpRequest,
+    id: web::Path<String>,
+) -> impl Responder {
+    match query_handler::delete_query(&pool, &req, &id).await {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({
             "success": true,
             "message": "Query deleted"
         })),
-        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({
-            "success": false,
-            "message": e.to_string()
-        }))
+        Err(e) => e.error_response(),
     }
 }

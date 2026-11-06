@@ -6,7 +6,7 @@ use serde_json::Value;
 pub async fn list_saved_queries(pool: &DbPool, req: &HttpRequest) -> Result<Vec<ContractQuery>, AppError> {
     let user_id = jwt::extract_user_id(req)?;
     Ok(sqlx::query_as("SELECT * FROM contract_queries WHERE user_id = ?")
-        .bind(&user_id).fetch_all(pool).await?)
+        .bind(user_id.to_string()).fetch_all(pool).await?)
 }
 
 pub async fn save_query(pool: &DbPool, req: &HttpRequest, payload: Value) -> Result<ContractQuery, AppError> {
@@ -22,16 +22,32 @@ pub async fn save_query(pool: &DbPool, req: &HttpRequest, payload: Value) -> Res
         "INSERT INTO contract_queries (id, user_id, contract_address, query_type)
          VALUES (?, ?, ?, ?) RETURNING *"
     )
-    .bind(&query_id).bind(&user_id).bind(contract_address).bind(query_type)
+    .bind(&query_id).bind(user_id.to_string()).bind(contract_address).bind(query_type)
     .fetch_one(pool).await?)
 }
 
-pub async fn get_saved_query(pool: &DbPool, id: &str) -> Result<ContractQuery, AppError> {
-    Ok(sqlx::query_as("SELECT * FROM contract_queries WHERE id = ?")
-        .bind(id).fetch_one(pool).await?)
+/// A saved query, only if it belongs to the caller. Someone else's query
+/// answers "not found" so ids can't be probed.
+pub async fn get_saved_query(pool: &DbPool, req: &HttpRequest, id: &str) -> Result<ContractQuery, AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    sqlx::query_as("SELECT * FROM contract_queries WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id.to_string())
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Query not found".to_string()))
 }
 
-pub async fn delete_query(pool: &DbPool, id: &str) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM contract_queries WHERE id = ?").bind(id).execute(pool).await?;
+/// Deletes a saved query owned by the caller.
+pub async fn delete_query(pool: &DbPool, req: &HttpRequest, id: &str) -> Result<(), AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    let result = sqlx::query("DELETE FROM contract_queries WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id.to_string())
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Query not found".to_string()));
+    }
     Ok(())
 }
