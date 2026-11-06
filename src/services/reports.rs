@@ -312,10 +312,11 @@ pub async fn traction_report(
     }
     if !peers.is_empty() {
         findings.push(format!(
-            "Ranked #{position} of {} {}s by active accounts in this period (top {:.0}%).",
+            "Ranked #{position} of {} {}s by active accounts in this period (top {}%).",
             peers.len(),
             if kind == "contract" { "contract" } else { "asset" },
-            (100.0 - percentile + 100.0 / peers.len() as f64).clamp(0.1, 100.0)
+            // Share of peers at or above this rank, rounded up so #1 of 256 reads "top 1%".
+            ((position as f64 / peers.len() as f64) * 100.0).ceil().max(1.0) as i64
         ));
     }
     if has_previous && prev.as_ref().is_some_and(|p| p.active > 0) {
