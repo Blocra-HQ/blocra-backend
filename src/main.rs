@@ -102,6 +102,11 @@ async fn main() -> std::io::Result<()> {
         log::warn!("AI_BASE_URL not set; /api/ai/* will answer 503");
     }
 
+    // Profile images are written under ./uploads; serve it even before the first upload.
+    if let Err(e) = std::fs::create_dir_all("./uploads/profiles") {
+        log::warn!("Could not create ./uploads: {e}");
+    }
+
     let host = config.host.clone();
     let port = config.port;
     
