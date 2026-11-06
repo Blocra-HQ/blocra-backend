@@ -101,7 +101,7 @@ pub const TABLES: &[(&str, &str, &[ColumnDoc])] = &[
             ("successful_txs", "INTEGER", "Successful transactions"),
             ("failed_txs", "INTEGER", "Failed or reverted transactions"),
             ("unique_senders", "INTEGER", "Distinct source accounts / senders"),
-            ("operation_count", "INTEGER", "Stellar operations in the ledger (null on other chains)"),
+            ("operation_count", "INTEGER", "Stellar operations applied in the ledger, i.e. from successful transactions only (the operations table also has failed ones); null on other chains"),
             ("total_fees", "REAL", "Fees paid in the block, in fee_unit"),
             ("fee_unit", "TEXT", "XLM, ETH, SOL, ..."),
             ("gas_used", "INTEGER", "Gas (EVM, Starknet) or compute units (Solana); null on Stellar"),
@@ -124,7 +124,7 @@ pub const TABLES: &[(&str, &str, &[ColumnDoc])] = &[
     ),
     (
         "operations",
-        "Stellar operations from every collected ledger (recent hours only; see retention).",
+        "Stellar operations from every collected ledger, including those in failed transactions (recent hours only; see retention).",
         &[
             ("chain", "TEXT", "stellar"),
             ("id", "TEXT", "Operation id"),
