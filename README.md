@@ -32,7 +32,9 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 
 | Area | What it does |
 |------|--------------|
-| Network dashboard | Latest block statistics for 37 chains: Stellar (Horizon), Starknet, 31 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types) |
+| Network dashboard | Latest block statistics for 37 chains: Stellar (Horizon), Starknet, 31 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types), with stored history |
+| Analytics store | Every Stellar ledger collected in the background (with its transactions and operations) plus every block a dashboard fetches, in a separate SQLite database |
+| SQL | Read-only SQL over the analytics store for the Query Editor and Dashboard Builder |
 | Stellar sign-in | Challenge/response login with a Stellar wallet (Freighter `signMessage`, SEP-53), issuing a JWT |
 | Accounts | Email/password, Google OAuth, profile and profile picture |
 | AI analyst | Chat, written contract reports and natural-language-to-SQL through any OpenAI-compatible model |
@@ -76,6 +78,7 @@ All routes are under `/api`. "JWT" means `Authorization: Bearer <token>` from a 
 | GET | `/api/dashboards/stats?chain=stellar` | - | Latest Stellar ledger statistics (default chain) |
 | GET | `/api/dashboards/stats?chain=starknet` | - | Latest Starknet block statistics |
 | GET | `/api/dashboards/stats?chain=<id>` | - | Latest block statistics for any chain in the registry; unknown ids return `404` with the supported list, upstream failures `502` |
+| GET | `/api/dashboards/history?chain=<id>&limit=60` | - | Stored blocks for a chain, oldest first, each in the `/stats` shape (`limit` 1-500) |
 | GET | `/api/dashboards` | JWT | The user's saved query and dashboard counts |
 | GET | `/api/dashboards/analytics` | - | Platform totals: users, saved queries, dashboards |
 
@@ -96,6 +99,45 @@ tried first when set. Endpoints whose head block is more than an hour old are sk
 
 The response shape is the same for every chain. A figure that cannot be read exactly is `null`
 and `stats.partial` says why (for example `"receipts unavailable"`); nothing is estimated.
+
+Every block `/stats` fetches is stored, and a block stored less than 8 seconds ago is served from the
+store instead of the RPC. Stellar ledgers are all collected in the background (next section), so
+Stellar stats answer in milliseconds and its history has every ledger; other chains' history holds
+the blocks that were fetched while someone had their dashboard open.
+
+### Analytics store and SQL
+
+The backend keeps the chain data it collects in its own SQLite database (`ANALYTICS_DATABASE_URL`,
+default `analytics.db` next to the main database). It holds public chain data only, never accounts.
+
+- **Collector** (`src/services/collector.rs`): every 3 s it reads the Stellar ledgers closed since
+  the last one stored (Horizon, 6 ledgers fetched at a time) and stores each ledger with all of its
+  transactions and operations. On first start it backfills `ANALYTICS_STELLAR_BACKFILL` ledgers. If it
+  falls more than 120 ledgers behind it skips ahead and logs the gap.
+- **Retention**: transactions and operations are kept `ANALYTICS_TX_RETENTION_HOURS` (24); blocks
+  `ANALYTICS_BLOCK_RETENTION_DAYS` (30). Stellar mainnet produces about 260 transactions and 500
+  operations per ledger (one ledger every ~5 s).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/query/schema` | - | Tables, columns and stored coverage per chain |
+| POST | `/api/query/run` | - | `{sql}`: one read-only `SELECT`/`WITH` query, at most 1,000 rows, 10 s timeout. Returns `{columns, rows, row_count, truncated, elapsed_ms}` |
+
+| Table | Rows | Columns |
+|-------|------|---------|
+| `blocks` | Every stored block or ledger, all chains | `chain, block_number, timestamp, transaction_count, successful_txs, failed_txs, unique_senders, operation_count, total_fees, fee_unit, gas_used` |
+| `transactions` | Stellar transactions | `chain, block_number, timestamp, hash, sender, fee, fee_unit, operation_count, successful` |
+| `operations` | Stellar operations | `chain, id, block_number, timestamp, tx_hash, type, source` |
+
+Queries run on a separate read-only connection pool (`query_only`), so they cannot write even if
+they get past validation, and the analytics database contains no user data to reach. Example:
+
+```sql
+SELECT strftime('%H:%M', timestamp, 'unixepoch') AS minute,
+       SUM(transaction_count) AS txs, SUM(failed_txs) AS failed, ROUND(SUM(total_fees), 4) AS fees_xlm
+FROM blocks WHERE chain = 'stellar'
+GROUP BY minute ORDER BY minute;
+```
 
 ### AI analyst
 
@@ -184,20 +226,26 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `HOST` | `0.0.0.0` | no | Bind address |
 | `PORT` | `5000` | no | Bind port |
 | `DATABASE_URL` | `sqlite:/tmp/blocra.db` | no | SQLite file; use persistent storage in production |
-| `CORS_ORIGIN` | `*` | no | Allowed browser origin (a single origin, or `*`) |
+| `CORS_ORIGIN` | `*` | no | Allowed browser origins, comma-separated, or `*` |
 | `STELLAR_NETWORK` | `mainnet` | no | `mainnet` or `testnet` |
 | `STELLAR_HORIZON_URL` | none | no | Horizon server tried before the built-in ones |
 | `STARKNET_RPC_URL` | none | no | Starknet RPC tried before the built-in ones |
 | `RPC_URL_<ID>` | none | no | RPC tried before the registry's endpoints for chain `<id>`, e.g. `RPC_URL_POLYGON` |
 | `ALCHEMY_API_KEY` | none | no | Enables `/api/contract/transactions` |
 | `AI_BASE_URL` | none | no | OpenAI-compatible base URL; enables `/api/ai/*` |
-| `AI_MODEL` | none | no | Model name for the AI endpoints |
+| `AI_MODEL` | `gpt-oss:120b-cloud` on Ollama, else `openai/gpt-oss-120b` | no | Model name for the AI endpoints |
+| `AI_REASONING_EFFORT` | `low` | no | `low`, `medium` or `high` for gpt-oss |
 | `AI_API_KEY` | none | no | Bearer token for hosted AI providers |
 | `AI_TIMEOUT_SECS` | `120` | no | Timeout per AI request |
 | `ADMIN_PASSWORD` | none | no | Enables `POST /api/admin/login` (at least 12 characters, compared in constant time) |
 | `GOOGLE_CLIENT_ID` | none | no | Google OAuth |
 | `GOOGLE_CLIENT_SECRET` | none | no | Google OAuth |
-| `RATE_LIMIT_MAX_REQUESTS` | `100` | no | Requests allowed per client IP per window (`429` with `Retry-After` beyond it; `/api/health` is exempt) |
+| `ANALYTICS_DATABASE_URL` | `analytics.db` next to `DATABASE_URL` | no | SQLite file for collected chain data |
+| `ANALYTICS_COLLECT` | `true` | no | Set `false` to stop collecting Stellar ledgers |
+| `ANALYTICS_STELLAR_BACKFILL` | `30` | no | Ledgers backfilled on first start |
+| `ANALYTICS_TX_RETENTION_HOURS` | `24` | no | How long Stellar transactions and operations are kept |
+| `ANALYTICS_BLOCK_RETENTION_DAYS` | `30` | no | How long blocks and dashboard history are kept |
+| `RATE_LIMIT_MAX_REQUESTS` | `1000` | no | Requests allowed per client IP per window (`429` with `Retry-After` beyond it; `/api/health` is exempt) |
 | `RATE_LIMIT_WINDOW_SECS` | `900` | no | Rate-limit window in seconds |
 | `TRUST_PROXY` | unset | no | Set to `1` behind a reverse proxy (Render, nginx) so rate limits use the client IP from `X-Forwarded-For` |
 | `RUST_LOG` | none | no | Log level, e.g. `info` |
@@ -296,9 +344,9 @@ scripts/               production setup helper
 
 ## Known issues
 
-These are tracked for fixing:
-
-- `CORS_ORIGIN` accepts a single origin (or `*`).
+- Per-transaction tables (`transactions`, `operations`) are collected for Stellar only; other
+  chains contribute block-level rows when their dashboard is viewed.
+- The analytics store is SQLite: fine for one server, not for several replicas writing at once.
 
 ## History
 

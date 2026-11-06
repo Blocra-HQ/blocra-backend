@@ -1,9 +1,10 @@
 //! Per-IP fixed-window rate limiting.
 //!
-//! Each client IP may make RATE_LIMIT_MAX_REQUESTS requests (default 100) per
+//! Each client IP may make RATE_LIMIT_MAX_REQUESTS requests (default 1000) per
 //! RATE_LIMIT_WINDOW_SECS (default 900). Over the limit, requests get 429 with
 //! Retry-After; every response carries RateLimit-Limit / -Remaining / -Reset.
-//! /api/health is never limited. Behind a reverse proxy (Render, nginx) set
+//! /api/health is never limited. (An open dashboard polls about 100 times in
+//! 15 minutes, so the default leaves room for several tabs and queries.) Behind a reverse proxy (Render, nginx) set
 //! TRUST_PROXY=1 so the client IP comes from X-Forwarded-For; otherwise the
 //! socket address is used, since the header can be forged by anyone.
 
@@ -65,7 +66,7 @@ fn limiter() -> &'static Mutex<FixedWindow> {
     LIMITER.get_or_init(|| {
         let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         Mutex::new(FixedWindow::new(
-            env("RATE_LIMIT_MAX_REQUESTS", 100) as u32,
+            env("RATE_LIMIT_MAX_REQUESTS", 1000) as u32,
             env("RATE_LIMIT_WINDOW_SECS", 900),
         ))
     })
