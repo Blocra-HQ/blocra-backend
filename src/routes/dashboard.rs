@@ -1,5 +1,5 @@
 use actix_web::{web, HttpResponse, Responder};
-use crate::{handlers::dashboard as dashboard_handler, db::DbPool, services::rpc::RpcService, services::stellar::StellarService};
+use crate::{handlers::dashboard as dashboard_handler, db::DbPool, services::rpc::RpcService, services::stellar::StellarService, services::chains::{self, ChainRpc}};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -10,11 +10,13 @@ struct StatsQuery {
 pub fn configure(cfg: &mut web::ServiceConfig) {
     let rpc_service = web::Data::new(RpcService::new());
     let stellar_service = web::Data::new(StellarService::from_env());
+    let chain_rpc = web::Data::new(ChainRpc::new());
 
     cfg.service(
         web::scope("/dashboards")
             .app_data(rpc_service)
             .app_data(stellar_service)
+            .app_data(chain_rpc)
             .route("", web::get().to(get_dashboard_data))
             .route("/analytics", web::get().to(get_analytics))
             .route("/stats", web::get().to(get_blockchain_stats))
@@ -44,20 +46,25 @@ async fn get_analytics(pool: web::Data<DbPool>) -> impl Responder {
 async fn get_blockchain_stats(
     rpc: web::Data<RpcService>,
     stellar: web::Data<StellarService>,
+    chain_rpc: web::Data<ChainRpc>,
     query: web::Query<StatsQuery>,
 ) -> impl Responder {
     let chain_id = query.chain.as_deref().unwrap_or("stellar");
     let result = match chain_id {
         "stellar" => dashboard_handler::get_stellar_stats(&stellar).await,
         "starknet" => dashboard_handler::get_blockchain_stats(&rpc).await,
-        other => {
-            return HttpResponse::NotImplemented().json(serde_json::json!({
-                "success": false,
-                "message": format!(
-                    "Network dashboard stats are available for Stellar and Starknet; '{other}' is not supported yet. Use Contract Analysis for this chain."
-                )
-            }))
-        }
+        other => match chains::chain(other) {
+            Some(chain) => dashboard_handler::get_chain_stats(&chain_rpc, other, chain).await,
+            None => {
+                return HttpResponse::NotFound().json(serde_json::json!({
+                    "success": false,
+                    "message": format!(
+                        "Unknown chain '{other}'. Supported chains: {}.",
+                        chains::registry().keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+                    )
+                }))
+            }
+        },
     };
     match result {
         Ok(stats) => HttpResponse::Ok().json(stats),
