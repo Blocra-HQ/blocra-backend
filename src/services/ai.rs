@@ -1,12 +1,16 @@
-//! BlocRA's AI analyst.
+//! BlocRA's AI analyst, built on OpenAI's open-weight gpt-oss models.
 //!
-//! Talks to any OpenAI-compatible chat-completions API, so the same code runs
-//! against a local Ollama, a self-hosted vLLM serving gpt-oss, or a hosted
-//! provider. Configure with:
+//! BlocRA has used gpt-oss (openai/gpt-oss-120b, or gpt-oss-20b on smaller
+//! hardware) since its first release. The service talks to any
+//! OpenAI-compatible chat-completions API, so gpt-oss can be served by Ollama
+//! (local weights or Ollama's cloud models), vLLM, or a hosted provider:
 //!
-//!   AI_BASE_URL  e.g. http://localhost:11434/v1 (Ollama) or https://api.provider.com/v1
-//!   AI_MODEL     e.g. qwen2.5:3b, gpt-oss:20b, openai/gpt-oss-120b
-//!   AI_API_KEY   optional bearer token for hosted providers
+//!   AI_BASE_URL          e.g. http://localhost:11434/v1 (Ollama),
+//!                        http://gpu-host:8000/v1 (vLLM),
+//!                        https://api.groq.com/openai/v1 (hosted)
+//!   AI_MODEL             default gpt-oss:120b-cloud on Ollama, openai/gpt-oss-120b elsewhere
+//!   AI_API_KEY           bearer token for hosted providers
+//!   AI_REASONING_EFFORT  low | medium | high for gpt-oss (default low)
 //!
 //! With AI_BASE_URL unset the AI endpoints answer 503.
 
@@ -21,8 +25,9 @@ transactions(transaction_hash TEXT, block_number INTEGER, sender_address TEXT, m
 contracts(address TEXT, class_hash TEXT, deployed_at_block INTEGER)";
 
 const ANALYST_PROMPT: &str = "You are BlocRA's on-chain analyst. BlocRA is a blockchain analytics \
-platform: users analyze smart contracts on 36 chains (Starknet, Ethereum and EVM networks, Solana), \
-write SQL over blocks, transactions and contracts, and build dashboards. Answer concisely and \
+platform built for Stellar: users analyze Soroban contracts and smart contracts on 40 chains \
+(Stellar, Starknet, Ethereum and EVM networks, Solana, Cosmos chains), publish reports to a registry \
+contract on Stellar, write SQL over blocks, transactions and contracts, and build dashboards. Answer concisely and \
 concretely. Only state numbers that appear in the data you are given; if something isn't in the \
 data, say so instead of guessing.";
 
@@ -32,6 +37,18 @@ pub struct AiService {
     base_url: String,
     model: String,
     api_key: Option<String>,
+    reasoning_effort: String,
+}
+
+/// Default model for a provider: Ollama serves gpt-oss as gpt-oss:<size>
+/// (the -cloud variant runs on Ollama's servers); vLLM and hosted providers
+/// use the Hugging Face id.
+pub fn default_model(base_url: &str) -> &'static str {
+    if base_url.contains(":11434") {
+        "gpt-oss:120b-cloud"
+    } else {
+        "openai/gpt-oss-120b"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,17 +73,25 @@ impl AiService {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(120);
+        let base_url = std::env::var("AI_BASE_URL").unwrap_or_default().trim_end_matches('/').to_string();
+        let model = std::env::var("AI_MODEL")
+            .ok()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| default_model(&base_url).to_string());
+        let reasoning_effort = match std::env::var("AI_REASONING_EFFORT").as_deref() {
+            Ok("medium") => "medium",
+            Ok("high") => "high",
+            _ => "low",
+        };
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(timeout))
                 .build()
                 .unwrap_or_default(),
-            base_url: std::env::var("AI_BASE_URL")
-                .unwrap_or_default()
-                .trim_end_matches('/')
-                .to_string(),
-            model: std::env::var("AI_MODEL").unwrap_or_default(),
+            base_url,
+            model,
             api_key: std::env::var("AI_API_KEY").ok().filter(|k| !k.is_empty()),
+            reasoning_effort: reasoning_effort.to_string(),
         }
     }
 
@@ -78,19 +103,25 @@ impl AiService {
         &self.model
     }
 
+    pub fn is_gpt_oss(&self) -> bool {
+        self.model.contains("gpt-oss")
+    }
+
     async fn complete(&self, messages: Vec<ChatMessage>, temperature: f32) -> Result<String, AiError> {
         if !self.is_configured() {
             return Err(AiError::NotConfigured);
         }
-        let mut req = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .json(&json!({
-                "model": self.model,
-                "messages": messages,
-                "temperature": temperature,
-                "stream": false,
-            }));
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": false,
+        });
+        // gpt-oss reasons before answering; low effort keeps reports fast.
+        if self.is_gpt_oss() {
+            body["reasoning_effort"] = json!(self.reasoning_effort);
+        }
+        let mut req = self.client.post(format!("{}/chat/completions", self.base_url)).json(&body);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -220,7 +251,14 @@ mod tests {
             base_url: String::new(),
             model: String::new(),
             api_key: None,
+            reasoning_effort: "low".into(),
         };
         assert!(!ai.is_configured());
+    }
+
+    #[test]
+    fn defaults_to_gpt_oss() {
+        assert_eq!(default_model("http://localhost:11434/v1"), "gpt-oss:120b-cloud");
+        assert_eq!(default_model("https://api.groq.com/openai/v1"), "openai/gpt-oss-120b");
     }
 }
