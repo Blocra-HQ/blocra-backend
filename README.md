@@ -35,6 +35,7 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 | Network dashboard | Latest block statistics for 37 chains: Stellar (Horizon), Starknet, 31 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types), with stored history |
 | Analytics store | Every Stellar ledger collected in the background (with its transactions and operations) plus every block a dashboard fetches, in a separate SQLite database |
 | SQL | Read-only SQL over the analytics store for the Query Editor and Dashboard Builder |
+| Traction reports | 7- or 30-day reports on a Soroban contract or Stellar asset: active, new and returning accounts, failure rate, concentration and bot share, function breakdown, ecosystem rank, coverage and methodology |
 | Stellar sign-in | Challenge/response login with a Stellar wallet (Freighter `signMessage`, SEP-53), issuing a JWT |
 | Accounts | Email/password, Google OAuth, profile and profile picture |
 | AI analyst | Chat, written contract reports and natural-language-to-SQL through any OpenAI-compatible model |
@@ -138,6 +139,34 @@ SELECT strftime('%H:%M', timestamp, 'unixepoch') AS minute,
 FROM blocks WHERE chain = 'stellar'
 GROUP BY minute ORDER BY minute;
 ```
+
+### Traction reports
+
+A traction report measures one Soroban contract (`C...`) or asset (`XLM`, `CODE:ISSUER`) over a 7- or
+30-day period against the period before, from the collector's daily tables (`activity_daily`,
+`function_daily`, `collected_days`). Every figure is computed in SQL; the findings are rule-based
+sentences over those figures; nothing is estimated or written by a model.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/reports/traction?subject=<id>&days=7` | - | The report (`days` 1-90). `404` when the subject has no recorded activity |
+| GET | `/api/reports/subjects?kind=contract\|asset&days=7&limit=20` | - | Most active contracts or assets, for pickers |
+
+| Section | Contents |
+|---------|----------|
+| `kpis` | Active accounts, new accounts (marked unreliable when history is shorter than the period), calls or payments, failure rate, volume (assets), calls per account, each with the previous period and % change |
+| `daily` | Active accounts, calls, failures and volume per UTC day |
+| `retention` | Accounts active in both periods |
+| `quality` | Top-10 account share of calls, accounts with at least 1,000 calls on one day (automated) and their share, top 5 accounts |
+| `functions` | Calls and failure rate per contract function |
+| `ecosystem` | Rank by active accounts among all contracts (or assets) active in the period, and the peers' median failure rate |
+| `asset_snapshot` | Holders and supply (accounts, contracts, pools) from Horizon at generation time |
+| `coverage` | Ledgers aggregated in the period, ledger range, completeness and days covered; reports say plainly when data is partial |
+| `methodology` | Definitions behind every figure |
+
+Contract calls are decoded from each `invoke_host_function` operation's parameters (contract address
+and function symbol, XDR in `src/services/scval.rs`). Asset activity is payments and path payments by
+sender; volume sums successful payments.
 
 ### AI analyst
 
