@@ -54,10 +54,33 @@ pub struct AuthResponse {
     pub user: UserResponse,
 }
 
+/// Trimmed, lower-cased email, or an error if it isn't plausibly an address.
+pub fn normalize_email(email: &str) -> Result<String, AppError> {
+    let email = email.trim().to_lowercase();
+    let valid = email.len() <= 254
+        && !email.contains(char::is_whitespace)
+        && email.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && !domain.contains('@')
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        });
+    if valid {
+        Ok(email)
+    } else {
+        Err(AppError::BadRequest("Please enter a valid email address".to_string()))
+    }
+}
+
 pub async fn register(
     pool: &DbPool,
-    payload: RegisterPayload,
+    mut payload: RegisterPayload,
 ) -> Result<AuthResponse, AppError> {
+    payload.email = normalize_email(&payload.email)?;
+    if payload.password.is_none() {
+        return Err(AppError::BadRequest("Password is required".to_string()));
+    }
     // Check if user exists
     let existing: Option<User> = sqlx::query_as(
         "SELECT * FROM users WHERE email = ?"
@@ -107,7 +130,7 @@ pub async fn login(
     let user: User = sqlx::query_as(
         "SELECT * FROM users WHERE email = ?"
     )
-    .bind(&payload.email)
+    .bind(payload.email.trim().to_lowercase())
     .fetch_one(pool)
     .await
     .map_err(|_| AppError::Unauthorized("Invalid credentials".to_string()))?;
@@ -173,9 +196,15 @@ pub async fn google_authenticate(
 
 /// Verify Google OAuth token with Google's API
 async fn verify_google_token(token: &str) -> Result<Value, AppError> {
+    // Without our client id we can't tell our tokens from any other app's.
+    let client_id = std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
+    if client_id.is_empty() {
+        return Err(AppError::BadRequest("Google sign-in is not configured on this server".to_string()));
+    }
     let client = reqwest::Client::new();
     let response = client
-        .get(&format!("https://oauth2.googleapis.com/tokeninfo?id_token={}", token))
+        .get("https://oauth2.googleapis.com/tokeninfo")
+        .query(&[("id_token", token)])
         .send()
         .await
         .map_err(|e| AppError::Unauthorized(format!("Failed to verify Google token: {}", e)))?;
@@ -198,6 +227,14 @@ async fn verify_google_token(token: &str) -> Result<Value, AppError> {
         }
     }
     
+    // The token must have been issued to BlocRA, not to some other app.
+    if user_info.get("aud").and_then(|v| v.as_str()) != Some(client_id.as_str()) {
+        return Err(AppError::Unauthorized("Google token was issued to a different app".to_string()));
+    }
+    if user_info.get("email_verified").and_then(|v| v.as_str()) != Some("true") {
+        return Err(AppError::Unauthorized("Google account email is not verified".to_string()));
+    }
+
     Ok(user_info)
 }
 
