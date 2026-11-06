@@ -52,11 +52,13 @@ struct Totals {
     calls: i64,
     failed: i64,
     volume: f64,
+    self_calls: i64,
 }
 
 async fn totals(db: &SqlitePool, subject: &str, p: Period<'_>) -> Result<Totals, sqlx::Error> {
-    let (active, calls, failed, volume): (i64, Option<i64>, Option<i64>, Option<f64>) = sqlx::query_as(
-        "SELECT COUNT(DISTINCT account), SUM(calls), SUM(failed), SUM(volume)
+    type TotalsRow = (i64, Option<i64>, Option<i64>, Option<f64>, Option<i64>);
+    let (active, calls, failed, volume, self_calls): TotalsRow = sqlx::query_as(
+        "SELECT COUNT(DISTINCT account), SUM(calls), SUM(failed), SUM(volume), SUM(self_calls)
          FROM activity_daily WHERE subject = ? AND day BETWEEN ? AND ?",
     )
     .bind(subject)
@@ -64,7 +66,13 @@ async fn totals(db: &SqlitePool, subject: &str, p: Period<'_>) -> Result<Totals,
     .bind(p.to)
     .fetch_one(db)
     .await?;
-    Ok(Totals { active, calls: calls.unwrap_or(0), failed: failed.unwrap_or(0), volume: volume.unwrap_or(0.0) })
+    Ok(Totals {
+        active,
+        calls: calls.unwrap_or(0),
+        failed: failed.unwrap_or(0),
+        volume: volume.unwrap_or(0.0),
+        self_calls: self_calls.unwrap_or(0),
+    })
 }
 
 /// Which kind of subject this is, from the store.
@@ -191,6 +199,7 @@ pub async fn traction_report(
         })
         .collect();
     let top10_share = (top10 as f64 / total_calls * 1000.0).round() / 10.0;
+    let self_share = (cur.self_calls as f64 / total_calls * 1000.0).round() / 10.0;
     let bot_share = (bot_calls as f64 / total_calls * 1000.0).round() / 10.0;
 
     // Functions (contracts only).
@@ -238,7 +247,8 @@ pub async fn traction_report(
     let median_fail = peer_fail.get(peer_fail.len() / 2).copied();
 
     // Coverage: ledgers in the period that went into the daily tables.
-    let (ledgers, l_from, l_to, t_from, t_to): (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>) =
+    type CoverageRow = (Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>);
+    let (ledgers, l_from, l_to, t_from, t_to): CoverageRow =
         sqlx::query_as(
             "SELECT SUM(ledgers), MIN(first_ledger), MAX(last_ledger), MIN(first_ts), MAX(last_ts)
              FROM collected_days WHERE day BETWEEN ? AND ? AND first_ledger IS NOT NULL",
@@ -295,6 +305,11 @@ pub async fn traction_report(
             "{} account{} made ≥{BOT_CALLS_PER_DAY} {unit} on a single day (automated); together {bot_share}% of all {unit}.",
             bots.len(),
             if bots.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if kind == "asset" && self_share >= 10.0 {
+        findings.push(format!(
+            "{self_share}% of payments were sent to the sender's own account (arbitrage loops); they are excluded from volume."
         ));
     }
     if let Some(m) = median_fail {
@@ -358,7 +373,9 @@ pub async fn traction_report(
                        "previous_active": prev.as_ref().map(|p| p.active),
                        "returning_pct": prev.as_ref().filter(|p| p.active > 0).map(|p| (returning as f64 / p.active as f64 * 1000.0).round() / 10.0) },
         "quality": { "top10_share_pct": top10_share, "bot_like_accounts": bots.len(), "bot_like_share_pct": bot_share,
-                     "bot_threshold_calls_per_day": BOT_CALLS_PER_DAY, "top_accounts": top_accounts },
+                     "bot_threshold_calls_per_day": BOT_CALLS_PER_DAY, "top_accounts": top_accounts,
+                     "self_payments": if kind == "asset" { json!(cur.self_calls) } else { Value::Null },
+                     "self_payment_share_pct": if kind == "asset" { json!(self_share) } else { Value::Null } },
         "functions": functions,
         "ecosystem": { "rank": position, "of": peers.len(), "percentile": percentile,
                        "median_failed_pct": median_fail.map(|m| (m * 10.0).round() / 10.0), "metric": "active_accounts" },
@@ -394,9 +411,12 @@ fn methodology(kind: &str) -> Vec<String> {
     if kind == "contract" {
         m.push("A call is one invoke_host_function operation targeting the contract; the account is the operation's source. Failed calls (from failed transactions) are included in calls and counted in failed.".to_string());
     } else {
-        m.push("Activity is payments and path payments of the asset; the account is the sender. Volume sums amounts of successful payments in the asset's units.".to_string());
+        m.push("Activity is payments and path payments of the asset; the account is the sender. Volume sums amounts of successful payments to other accounts, in the asset's units; payments to oneself (arbitrage loops) are counted as self-payments and left out of volume.".to_string());
     }
-    m.push(format!("Automated (bot-like) accounts made at least {BOT_CALLS_PER_DAY} calls on a single day."));
+    m.push(format!(
+        "Automated (bot-like) accounts made at least {BOT_CALLS_PER_DAY} {} on a single day.",
+        if kind == "contract" { "calls" } else { "payments" }
+    ));
     m.push("New accounts were first seen during the period in all data BlocRA has collected; with less history than the period, they are marked unreliable.".to_string());
     m.push("Ecosystem rank compares active accounts with every contract (or asset) active in the same period; the failure-rate median uses peers with at least 10 active accounts.".to_string());
     m

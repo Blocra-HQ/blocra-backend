@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS activity_daily (
     calls INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0,
     volume REAL NOT NULL DEFAULT 0,
+    self_calls INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (subject, day, account)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS activity_by_day ON activity_daily (day, kind);
@@ -247,6 +248,7 @@ impl Analytics {
         for col in ["contract TEXT", "function TEXT", "asset TEXT", "amount REAL", "destination TEXT"] {
             let _ = sqlx::query(&format!("ALTER TABLE operations ADD COLUMN {col}")).execute(&rw).await;
         }
+        let _ = sqlx::query("ALTER TABLE activity_daily ADD COLUMN self_calls INTEGER NOT NULL DEFAULT 0").execute(&rw).await;
         for col in ["first_ledger INTEGER", "last_ledger INTEGER", "first_ts INTEGER", "last_ts INTEGER"] {
             let _ = sqlx::query(&format!("ALTER TABLE collected_days ADD COLUMN {col}")).execute(&rw).await;
         }
@@ -325,7 +327,7 @@ impl Analytics {
             .await?;
 
             if let Some((contract, function)) = &call {
-                add_activity(&mut tx, contract, &day, &o.source_account, "contract", failed, 0.0).await?;
+                add_activity(&mut tx, contract, &day, &o.source_account, "contract", failed, 0.0, false).await?;
                 sqlx::query(
                     "INSERT INTO function_daily (contract, day, function, calls, failed) VALUES (?, ?, ?, 1, ?)
                      ON CONFLICT (contract, day, function) DO UPDATE SET
@@ -339,10 +341,13 @@ impl Analytics {
                 .await?;
             }
             if let Some(asset) = &asset {
-                // Payments move value only when the transaction succeeded.
-                let volume = if failed { 0.0 } else { amount.unwrap_or(0.0) };
+                // Payments move value only when the transaction succeeded, and
+                // a payment to oneself (arbitrage loops via path payments)
+                // moves none to anyone else, so neither counts as volume.
                 let sender = o.from.as_deref().unwrap_or(&o.source_account);
-                add_activity(&mut tx, asset, &day, sender, "asset", failed, volume).await?;
+                let to_self = o.to.as_deref() == Some(sender);
+                let volume = if failed || to_self { 0.0 } else { amount.unwrap_or(0.0) };
+                add_activity(&mut tx, asset, &day, sender, "asset", failed, volume, to_self).await?;
             }
         }
         sqlx::query(
@@ -493,6 +498,7 @@ async fn insert_block(
     Ok(inserted)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn add_activity(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     subject: &str,
@@ -501,11 +507,14 @@ async fn add_activity(
     kind: &str,
     failed: bool,
     volume: f64,
+    to_self: bool,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO activity_daily (subject, day, account, kind, calls, failed, volume) VALUES (?, ?, ?, ?, 1, ?, ?)
+        "INSERT INTO activity_daily (subject, day, account, kind, calls, failed, volume, self_calls)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?)
          ON CONFLICT (subject, day, account) DO UPDATE SET
-           calls = calls + 1, failed = failed + excluded.failed, volume = volume + excluded.volume",
+           calls = calls + 1, failed = failed + excluded.failed, volume = volume + excluded.volume,
+           self_calls = self_calls + excluded.self_calls",
     )
     .bind(subject)
     .bind(day)
@@ -513,6 +522,7 @@ async fn add_activity(
     .bind(kind)
     .bind(failed as i64)
     .bind(volume)
+    .bind(to_self as i64)
     .execute(&mut **tx)
     .await?;
     Ok(())
