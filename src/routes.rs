@@ -11,6 +11,7 @@ mod dashboard_builder;
 mod contract_transactions;
 mod ai;
 mod sql;
+mod reports;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -26,5 +27,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .configure(contract_transactions::configure)
             .configure(ai::configure)
             .configure(sql::configure)
+            .configure(reports::configure)
     );
 }

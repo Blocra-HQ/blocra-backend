@@ -75,6 +75,39 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE INDEX IF NOT EXISTS operations_by_block ON operations (chain, block_number);
 CREATE INDEX IF NOT EXISTS operations_by_type ON operations (type);
 
+-- Daily activity per subject (a Soroban contract C..., or an asset XLM /
+-- CODE:ISSUER) and account, kept long-term for traction reports.
+CREATE TABLE IF NOT EXISTS activity_daily (
+    subject TEXT NOT NULL,
+    day TEXT NOT NULL,
+    account TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    volume REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (subject, day, account)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS activity_by_day ON activity_daily (day, kind);
+
+CREATE TABLE IF NOT EXISTS function_daily (
+    contract TEXT NOT NULL,
+    day TEXT NOT NULL,
+    function TEXT NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (contract, day, function)
+) WITHOUT ROWID;
+
+-- Days whose ledgers were collected, with how many, so reports can state coverage.
+CREATE TABLE IF NOT EXISTS collected_days (
+    day TEXT PRIMARY KEY,
+    ledgers INTEGER NOT NULL DEFAULT 0,
+    first_ledger INTEGER,
+    last_ledger INTEGER,
+    first_ts INTEGER,
+    last_ts INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS block_summaries (
     chain TEXT NOT NULL,
     block_number INTEGER NOT NULL,
@@ -210,6 +243,16 @@ impl Analytics {
             .busy_timeout(Duration::from_secs(5));
         let rw = SqlitePoolOptions::new().max_connections(2).connect_with(rw_opts.clone()).await?;
         sqlx::raw_sql(SCHEMA).execute(&rw).await?;
+        // Columns added after the first release; ignore "duplicate column".
+        for col in ["contract TEXT", "function TEXT", "asset TEXT", "amount REAL", "destination TEXT"] {
+            let _ = sqlx::query(&format!("ALTER TABLE operations ADD COLUMN {col}")).execute(&rw).await;
+        }
+        for col in ["first_ledger INTEGER", "last_ledger INTEGER", "first_ts INTEGER", "last_ts INTEGER"] {
+            let _ = sqlx::query(&format!("ALTER TABLE collected_days ADD COLUMN {col}")).execute(&rw).await;
+        }
+        sqlx::raw_sql("CREATE INDEX IF NOT EXISTS operations_by_contract ON operations (contract)")
+            .execute(&rw)
+            .await?;
         let ro_opts = rw_opts.read_only(true).create_if_missing(false).pragma("query_only", "ON");
         let ro = SqlitePoolOptions::new().max_connections(4).connect_with(ro_opts).await?;
         Ok(Self { rw, ro })
@@ -223,7 +266,8 @@ impl Analytics {
         tx.commit().await
     }
 
-    /// Stores a Stellar ledger with its transactions and operations.
+    /// Stores a Stellar ledger with its transactions and operations, and adds
+    /// it to the daily activity tables.
     pub async fn record_stellar_ledger(
         &self,
         summary: &Value,
@@ -232,8 +276,12 @@ impl Analytics {
     ) -> Result<(), sqlx::Error> {
         let ledger = summary["block_number"].as_i64().unwrap_or(0);
         let ts = summary["timestamp"].as_i64().unwrap_or(0);
+        let day = day_of(ts);
         let mut tx = self.rw.begin().await?;
-        insert_block(&mut tx, "stellar", summary).await?;
+        // A ledger stored before is not counted twice in the daily tables.
+        if !insert_block(&mut tx, "stellar", summary).await? {
+            return tx.commit().await;
+        }
         for t in txs {
             let fee = t.fee_charged.as_deref().and_then(|f| f.parse::<f64>().ok()).map(|s| s / 1e7);
             sqlx::query(
@@ -253,9 +301,14 @@ impl Analytics {
         }
         for o in ops {
             let op_ts = parse_time(&o.created_at);
+            let call = o.contract_call();
+            let asset = o.payment_asset();
+            let amount = o.amount.as_deref().and_then(|a| a.parse::<f64>().ok());
+            let failed = !o.transaction_successful.unwrap_or(true);
             sqlx::query(
-                "INSERT OR IGNORE INTO operations (chain, id, block_number, timestamp, tx_hash, type, source)
-                 VALUES ('stellar', ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO operations
+                 (chain, id, block_number, timestamp, tx_hash, type, source, contract, function, asset, amount, destination)
+                 VALUES ('stellar', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&o.id)
             .bind(ledger)
@@ -263,10 +316,56 @@ impl Analytics {
             .bind(&o.transaction_hash)
             .bind(&o.operation_type)
             .bind(&o.source_account)
+            .bind(call.as_ref().map(|c| c.0.as_str()))
+            .bind(call.as_ref().and_then(|c| c.1.as_deref()))
+            .bind(asset.as_deref())
+            .bind(if asset.is_some() { amount } else { None })
+            .bind(o.to.as_deref())
             .execute(&mut *tx)
             .await?;
+
+            if let Some((contract, function)) = &call {
+                add_activity(&mut tx, contract, &day, &o.source_account, "contract", failed, 0.0).await?;
+                sqlx::query(
+                    "INSERT INTO function_daily (contract, day, function, calls, failed) VALUES (?, ?, ?, 1, ?)
+                     ON CONFLICT (contract, day, function) DO UPDATE SET
+                       calls = calls + 1, failed = failed + excluded.failed",
+                )
+                .bind(contract)
+                .bind(&day)
+                .bind(function.as_deref().unwrap_or("(unknown)"))
+                .bind(failed as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+            if let Some(asset) = &asset {
+                // Payments move value only when the transaction succeeded.
+                let volume = if failed { 0.0 } else { amount.unwrap_or(0.0) };
+                let sender = o.from.as_deref().unwrap_or(&o.source_account);
+                add_activity(&mut tx, asset, &day, sender, "asset", failed, volume).await?;
+            }
         }
+        sqlx::query(
+            "INSERT INTO collected_days (day, ledgers, first_ledger, last_ledger, first_ts, last_ts) VALUES (?, 1, ?, ?, ?, ?)
+             ON CONFLICT (day) DO UPDATE SET ledgers = ledgers + 1,
+               first_ledger = MIN(COALESCE(first_ledger, excluded.first_ledger), excluded.first_ledger),
+               last_ledger = MAX(COALESCE(last_ledger, excluded.last_ledger), excluded.last_ledger),
+               first_ts = MIN(COALESCE(first_ts, excluded.first_ts), excluded.first_ts),
+               last_ts = MAX(COALESCE(last_ts, excluded.last_ts), excluded.last_ts)",
+        )
+        .bind(&day)
+        .bind(ledger)
+        .bind(ledger)
+        .bind(ts)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await
+    }
+
+    /// The pool reports and other read-only internal queries use.
+    pub fn reader(&self) -> &SqlitePool {
+        &self.rw
     }
 
     pub async fn latest_block(&self, chain: &str) -> Result<Option<i64>, sqlx::Error> {
@@ -353,17 +452,18 @@ impl Analytics {
     }
 }
 
+/// Returns whether the block was new.
 async fn insert_block(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     chain: &str,
     summary: &Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
     let block = match summary["block_number"].as_i64() {
         Some(b) => b,
-        None => return Ok(()),
+        None => return Ok(false),
     };
     let s = &summary["stats"];
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT OR IGNORE INTO blocks (chain, block_number, timestamp, transaction_count, successful_txs,
          failed_txs, unique_senders, operation_count, total_fees, fee_unit, gas_used)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -380,7 +480,9 @@ async fn insert_block(
     .bind(s["fee_unit"].as_str())
     .bind(int(&s["gas_used"]))
     .execute(&mut **tx)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
     sqlx::query("INSERT OR IGNORE INTO block_summaries (chain, block_number, collected_at, summary) VALUES (?, ?, ?, ?)")
         .bind(chain)
         .bind(block)
@@ -388,7 +490,39 @@ async fn insert_block(
         .bind(summary.to_string())
         .execute(&mut **tx)
         .await?;
+    Ok(inserted)
+}
+
+async fn add_activity(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    subject: &str,
+    day: &str,
+    account: &str,
+    kind: &str,
+    failed: bool,
+    volume: f64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO activity_daily (subject, day, account, kind, calls, failed, volume) VALUES (?, ?, ?, ?, 1, ?, ?)
+         ON CONFLICT (subject, day, account) DO UPDATE SET
+           calls = calls + 1, failed = failed + excluded.failed, volume = volume + excluded.volume",
+    )
+    .bind(subject)
+    .bind(day)
+    .bind(account)
+    .bind(kind)
+    .bind(failed as i64)
+    .bind(volume)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
+}
+
+/// UTC calendar day of a unix timestamp, e.g. "2026-11-06".
+pub fn day_of(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|d| d.date_naive().to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 /// Checks that `sql` is a single SELECT/WITH statement and returns it without

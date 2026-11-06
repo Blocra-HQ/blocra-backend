@@ -788,7 +788,7 @@ mod tests {
         };
         let op = |kind: &str| HorizonOperation {
             id: "o".into(), paging_token: "1".into(), transaction_hash: "t".into(), source_account: "G".into(),
-            operation_type: kind.into(), created_at: String::new(),
+            operation_type: kind.into(), created_at: String::new(), ..Default::default()
         };
         let out = summarize_ledger(
             &ledger,

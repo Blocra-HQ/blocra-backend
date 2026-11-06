@@ -75,7 +75,7 @@ pub struct HorizonTransaction {
     pub successful: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HorizonOperation {
     pub id: String,
     pub paging_token: String,
@@ -84,6 +84,63 @@ pub struct HorizonOperation {
     #[serde(rename = "type")]
     pub operation_type: String,
     pub created_at: String,
+    #[serde(default)]
+    pub transaction_successful: Option<bool>,
+    // invoke_host_function: the first parameter is the contract address and
+    // the second the function name, both base64 XDR ScVals.
+    #[serde(default)]
+    pub function: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<Vec<HostFunctionParam>>,
+    // payment / path payments
+    #[serde(default)]
+    pub asset_type: Option<String>,
+    #[serde(default)]
+    pub asset_code: Option<String>,
+    #[serde(default)]
+    pub asset_issuer: Option<String>,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub amount: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostFunctionParam {
+    #[serde(rename = "type")]
+    pub param_type: String,
+    pub value: String,
+}
+
+impl HorizonOperation {
+    /// Contract id (C...) and function name of a contract call.
+    pub fn contract_call(&self) -> Option<(String, Option<String>)> {
+        if self.operation_type != "invoke_host_function"
+            || self.function.as_deref() != Some("HostFunctionTypeHostFunctionTypeInvokeContract")
+        {
+            return None;
+        }
+        let params = self.parameters.as_ref()?;
+        let contract = crate::services::scval::address(&params.first()?.value)?;
+        let function = params.get(1).and_then(|p| crate::services::scval::symbol(&p.value));
+        Some((contract, function))
+    }
+
+    /// Asset moved by a payment or path payment: "XLM" or "CODE:ISSUER".
+    pub fn payment_asset(&self) -> Option<String> {
+        if !matches!(
+            self.operation_type.as_str(),
+            "payment" | "path_payment_strict_send" | "path_payment_strict_receive"
+        ) {
+            return None;
+        }
+        match self.asset_type.as_deref()? {
+            "native" => Some("XLM".to_string()),
+            _ => Some(format!("{}:{}", self.asset_code.as_deref()?, self.asset_issuer.as_deref()?)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +216,28 @@ impl StellarService {
             .into_iter()
             .next()
             .ok_or_else(|| AppError::BadRequest("Horizon returned no ledgers".into()))
+    }
+
+    /// Holders and supply of a credit asset ("CODE:ISSUER") right now, from
+    /// Horizon's /assets. None for XLM or unknown assets.
+    pub async fn asset_snapshot(&self, asset: &str) -> Result<Option<serde_json::Value>, AppError> {
+        let Some((code, issuer)) = asset.split_once(':') else { return Ok(None) };
+        let records: Vec<serde_json::Value> =
+            self.records(&format!("/assets?asset_code={code}&asset_issuer={issuer}&limit=1")).await?;
+        let Some(r) = records.into_iter().next() else { return Ok(None) };
+        let f = |v: &serde_json::Value| v.as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let held = f(&r["balances"]["authorized"]) + f(&r["balances"]["authorized_to_maintain_liabilities"]);
+        Ok(Some(serde_json::json!({
+            "holders": r["accounts"]["authorized"],
+            "supply_in_accounts": held,
+            "supply_in_contracts": f(&r["contracts_amount"]),
+            "supply_in_liquidity_pools": f(&r["liquidity_pools_amount"]),
+            "contract_holders": r["num_contracts"],
+            "liquidity_pools": r["num_liquidity_pools"],
+            "sac_contract_id": r["contract_id"],
+            "toml": r["_links"]["toml"]["href"],
+            "as_of": chrono::Utc::now().to_rfc3339(),
+        })))
     }
 
     /// Up to `limit` (max 200) ledgers after `after`, oldest first.
