@@ -182,8 +182,9 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `ADMIN_PASSWORD` | none | no | Enables `POST /api/admin/login` (at least 12 characters, compared in constant time) |
 | `GOOGLE_CLIENT_ID` | none | no | Google OAuth |
 | `GOOGLE_CLIENT_SECRET` | none | no | Google OAuth |
-| `RATE_LIMIT_MAX_REQUESTS` | `100` | no | Read into config, not yet enforced (see [Known issues](#known-issues)) |
-| `RATE_LIMIT_WINDOW_SECS` | `900` | no | Same as above |
+| `RATE_LIMIT_MAX_REQUESTS` | `100` | no | Requests allowed per client IP per window (`429` with `Retry-After` beyond it; `/api/health` is exempt) |
+| `RATE_LIMIT_WINDOW_SECS` | `900` | no | Rate-limit window in seconds |
+| `TRUST_PROXY` | unset | no | Set to `1` behind a reverse proxy (Render, nginx) so rate limits use the client IP from `X-Forwarded-For` |
 | `RUST_LOG` | none | no | Log level, e.g. `info` |
 
 ## Running locally
@@ -280,8 +281,6 @@ scripts/               production setup helper
 
 These are tracked for fixing:
 
-- `RateLimitMiddleware` currently passes every request through; the `RATE_LIMIT_*` settings are not
-  enforced.
 - `CORS_ORIGIN` accepts a single origin (or `*`).
 
 ## History
