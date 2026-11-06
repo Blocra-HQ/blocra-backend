@@ -99,8 +99,8 @@ Without `AI_BASE_URL` and `AI_MODEL` these answer `503`. Provider failures answe
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET / POST | `/api/queries` | JWT | List or save queries |
-| GET | `/api/queries/{id}` | - | One saved query |
-| DELETE | `/api/queries/{id}` | - | Delete a saved query (see [Known issues](#known-issues)) |
+| GET | `/api/queries/{id}` | JWT (owner) | One of your saved queries (`404` for others') |
+| DELETE | `/api/queries/{id}` | JWT (owner) | Delete one of your saved queries |
 
 ### Dashboard builder
 
@@ -119,7 +119,7 @@ Without `AI_BASE_URL` and `AI_MODEL` these answer `503`. Provider failures answe
 |--------|------|------|-------------|
 | POST | `/api/contracts/query` | JWT | Run and record a contract query |
 | GET | `/api/contracts/queries` | JWT | The user's contract queries |
-| GET | `/api/contracts/queries/{id}` | - | One contract query |
+| GET | `/api/contracts/queries/{id}` | JWT (owner) | One of your contract queries (`404` for others') |
 | POST | `/api/contracts/events` | - | Starknet events for a contract and block range |
 | POST | `/api/contracts/analyze` | - | Starknet contract activity summary |
 | POST | `/api/contracts/save-query` | JWT | Save a query |

@@ -17,7 +17,7 @@ pub async fn query_contract(pool: &DbPool, req: &HttpRequest, payload: Value) ->
         "INSERT INTO contract_queries (id, user_id, contract_address, query_type, parameters)
          VALUES (?, ?, ?, ?, ?) RETURNING *"
     )
-    .bind(&query_id).bind(&user_id).bind(contract_address)
+    .bind(&query_id).bind(user_id.to_string()).bind(contract_address)
     .bind(query_type).bind(parameters)
     .fetch_one(pool).await?)
 }
@@ -25,12 +25,18 @@ pub async fn query_contract(pool: &DbPool, req: &HttpRequest, payload: Value) ->
 pub async fn list_queries(pool: &DbPool, req: &HttpRequest) -> Result<Vec<ContractQuery>, AppError> {
     let user_id = jwt::extract_user_id(req)?;
     Ok(sqlx::query_as("SELECT * FROM contract_queries WHERE user_id = ? ORDER BY created_at DESC")
-        .bind(&user_id).fetch_all(pool).await?)
+        .bind(user_id.to_string()).fetch_all(pool).await?)
 }
 
-pub async fn get_query(pool: &DbPool, id: &str) -> Result<ContractQuery, AppError> {
-    Ok(sqlx::query_as("SELECT * FROM contract_queries WHERE id = ?")
-        .bind(id).fetch_one(pool).await?)
+/// One of the caller's contract queries; others' answer "not found".
+pub async fn get_query(pool: &DbPool, req: &HttpRequest, id: &str) -> Result<ContractQuery, AppError> {
+    let user_id = jwt::extract_user_id(req)?;
+    sqlx::query_as("SELECT * FROM contract_queries WHERE id = ? AND user_id = ?")
+        .bind(id)
+        .bind(user_id.to_string())
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Query not found".to_string()))
 }
 
 // RPC-based contract event fetching
@@ -140,7 +146,7 @@ pub async fn save_contract_query(pool: &DbPool, req: &HttpRequest, payload: Valu
          VALUES (?, ?, ?, ?, ?, ?)"
     )
     .bind(&query_id)
-    .bind(&user_id)
+    .bind(user_id.to_string())
     .bind(contracts)
     .bind(chain)
     .bind(from_date)
@@ -163,7 +169,7 @@ pub async fn get_saved_queries(pool: &DbPool, req: &HttpRequest) -> Result<Value
     let queries: Vec<ContractQuery> = sqlx::query_as(
         "SELECT * FROM contract_queries WHERE user_id = ? ORDER BY created_at DESC LIMIT 50"
     )
-    .bind(&user_id)
+    .bind(user_id.to_string())
     .fetch_all(pool)
     .await?;
 

@@ -41,13 +41,14 @@ async fn list_queries(pool: web::Data<DbPool>, req: actix_web::HttpRequest) -> i
     }
 }
 
-async fn get_query(pool: web::Data<DbPool>, id: web::Path<String>) -> impl Responder {
-    match contract_handler::get_query(&pool, &id).await {
+async fn get_query(
+    pool: web::Data<DbPool>,
+    req: actix_web::HttpRequest,
+    id: web::Path<String>,
+) -> impl Responder {
+    match contract_handler::get_query(&pool, &req, &id).await {
         Ok(query) => HttpResponse::Ok().json(query),
-        Err(e) => HttpResponse::NotFound().json(serde_json::json!({
-            "success": false,
-            "message": e.to_string()
-        }))
+        Err(e) => actix_web::ResponseError::error_response(&e),
     }
 }
 
