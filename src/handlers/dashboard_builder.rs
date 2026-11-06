@@ -384,12 +384,23 @@ pub async fn delete_dashboard(
 ) -> Result<(), AppError> {
     let user_id = jwt::extract_user_id(req)?;
 
+    delete_dashboard_for(pool, user_id, dashboard_id).await
+}
+
+/// SQLite foreign keys are not enforced here, so widgets are removed explicitly.
+pub(crate) async fn delete_dashboard_for(pool: &DbPool, user_id: i64, dashboard_id: i64) -> Result<(), AppError> {
+    owned_dashboard(pool, user_id, dashboard_id).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM dashboard_widgets WHERE dashboard_id = ?")
+        .bind(dashboard_id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM dashboards WHERE id = ? AND user_id = ?")
         .bind(dashboard_id)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-
+    tx.commit().await?;
     Ok(())
 }
 
@@ -452,12 +463,17 @@ mod tests {
         assert_eq!(replaced.widgets.len(), 1);
         assert_eq!(replaced.widgets[0].visualization_type, "table");
 
-        // Another user can neither read nor overwrite it.
+        // Another user can neither read, overwrite nor delete it.
+        assert!(matches!(delete_dashboard_for(&pool, user + 1, id).await, Err(AppError::NotFound(_))));
         assert!(matches!(get_dashboard_for(&pool, user + 1, id).await, Err(AppError::NotFound(_))));
         assert!(matches!(
             replace_dashboard_for(&pool, user + 1, id, &payload(json!({"name": "x"}))).await,
             Err(AppError::NotFound(_))
         ));
+
+        delete_dashboard_for(&pool, user, id).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dashboard_widgets").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
     }
 
     #[tokio::test]
