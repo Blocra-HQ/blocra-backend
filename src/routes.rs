@@ -12,6 +12,7 @@ mod contract_transactions;
 mod ai;
 mod sql;
 mod reports;
+mod contract_data;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(

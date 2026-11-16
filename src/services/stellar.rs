@@ -131,6 +131,19 @@ impl HorizonOperation {
         Some((contract, function))
     }
 
+    /// Arguments of a contract call (the parameters after the contract and
+    /// function name), decoded to JSON.
+    pub fn call_args(&self) -> serde_json::Value {
+        let params = self.parameters.as_deref().unwrap_or_default();
+        serde_json::Value::Array(
+            params
+                .iter()
+                .skip(2)
+                .map(|p| crate::services::xdr_json::decode(&p.value).map_or(serde_json::Value::Null, |v| crate::services::xdr_json::to_json(&v)))
+                .collect(),
+        )
+    }
+
     /// Asset moved by a payment or path payment: "XLM" or "CODE:ISSUER".
     pub fn payment_asset(&self) -> Option<String> {
         if !matches!(
@@ -181,7 +194,10 @@ impl StellarService {
         horizon_urls.extend(defaults.iter().map(|s| s.to_string()));
         Self {
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(20))
+                // A full page of a busy ledger can take Horizon well over 20s.
+                .timeout(Duration::from_secs(
+                    std::env::var("STELLAR_HORIZON_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60),
+                ))
                 .user_agent("blocra-backend")
                 .build()
                 .unwrap_or_default(),

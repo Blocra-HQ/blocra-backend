@@ -10,6 +10,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/queries/{id}", web::get().to(get_query))
             .route("/save-query", web::post().to(save_query))
             .route("/saved-queries", web::get().to(get_saved_queries))
+            .configure(super::contract_data::routes)
     );
 }
 

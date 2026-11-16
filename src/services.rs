@@ -9,3 +9,7 @@ pub mod scval;
 pub mod reports;
 pub mod attestation;
 pub mod soroban_auth;
+pub mod xdr_json;
+pub mod contract_events;
+pub mod contract_spec;
+pub mod soroban_rpc;

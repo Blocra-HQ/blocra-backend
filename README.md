@@ -39,7 +39,8 @@ Rust, Actix-web 4, SQLite through sqlx (migrations embedded at compile time).
 | Area | What it does |
 |------|--------------|
 | Network dashboard | Latest block statistics for 37 chains: Stellar (Horizon), Starknet, 31 EVM chains, Solana and three CometBFT chains (transactions, failures, fees, gas, senders, transaction types), with stored history |
-| Analytics store | Every Stellar ledger collected in the background (with its transactions and operations) plus every block a dashboard fetches, in a separate SQLite database |
+| Analytics store | Every Stellar ledger collected in the background (with its transactions, operations and contract events) plus every block a dashboard fetches, in a separate SQLite database |
+| Contract data | Any Soroban contract's interface read from its code (functions, argument names, events, types), its calls with named arguments, its events, token flows in and out, and users reached directly or through other contracts |
 | SQL | Read-only SQL over the analytics store for the Query Editor and Dashboard Builder |
 | Traction reports | 7- or 30-day reports on a Soroban contract or Stellar asset: active, new and returning accounts, failure rate, concentration and bot share, function breakdown, ecosystem rank, coverage and methodology |
 | Stellar sign-in | Challenge/response login with a Stellar wallet (Freighter `signMessage`, SEP-53), issuing a JWT |
@@ -121,8 +122,16 @@ default `analytics.db` next to the main database). It holds public chain data on
   the last one stored (Horizon, 6 ledgers fetched at a time) and stores each ledger with all of its
   transactions and operations. On first start it backfills `ANALYTICS_STELLAR_BACKFILL` ledgers. If it
   falls more than 120 ledgers behind it skips ahead and logs the gap.
-- **Retention**: transactions and operations are kept `ANALYTICS_TX_RETENTION_HOURS` (24); blocks
-  `ANALYTICS_BLOCK_RETENTION_DAYS` (30). Stellar mainnet produces about 260 transactions and 500
+- **Contract events**: for each ledger it also reads the contract events from Stellar RPC
+  (`getEvents`, registry endpoints with failover, `RPC_URL_STELLAR` first) and keeps those of Soroban
+  transactions, including events from contracts called by other contracts. Token `transfer`, `mint`,
+  `burn` and `clawback` events (SEP-41 and CAP-67 layouts) become token movements. Each event is
+  credited to the transaction's user (first authorizer, else source account). If the RPC fails, the
+  ledger is stored without events and `collected_days.event_ledgers` shows the gap.
+  `ANALYTICS_EVENTS=false` turns this off.
+- **Retention**: transactions and operations are kept `ANALYTICS_TX_RETENTION_HOURS` (24); events and
+  token movements `ANALYTICS_EVENT_RETENTION_HOURS` (72); blocks `ANALYTICS_BLOCK_RETENTION_DAYS`
+  (30). Daily tables are kept. Stellar mainnet produces about 260 transactions and 500
   operations per ledger (one ledger every ~5 s).
 
 | Method | Path | Auth | Description |
@@ -134,7 +143,16 @@ default `analytics.db` next to the main database). It holds public chain data on
 |-------|------|---------|
 | `blocks` | Every stored block or ledger, all chains | `chain, block_number, timestamp, transaction_count, successful_txs, failed_txs, unique_senders, operation_count, total_fees, fee_unit, gas_used` |
 | `transactions` | Stellar transactions | `chain, block_number, timestamp, hash, sender, fee, fee_unit, operation_count, successful` |
-| `operations` | Stellar operations | `chain, id, block_number, timestamp, tx_hash, type, source` |
+| `operations` | Stellar operations | `chain, id, block_number, timestamp, tx_hash, type, source, contract, function, args, user_account, relayed, asset, amount, destination` |
+| `events` | Contract events of Soroban transactions | `chain, id, block_number, timestamp, tx_hash, op_index, contract, name, topics, data, user_account` |
+| `token_transfers` | Token movements from token events | `chain, id, block_number, timestamp, tx_hash, token, kind, from_address, to_address, amount, amount_raw, asset, user_account` |
+| `event_daily` | Events per contract, name and day (kept) | `contract, day, name, events` |
+| `token_flow_daily` | Tokens in and out of each contract or liquidity pool per day (kept) | `token, day, address, received, sent, transfers_in, transfers_out` |
+| `contract_reach_daily` | Users of every transaction that touched a contract, directly or through other contracts (kept) | `contract, day, account, txs, direct_txs` |
+
+`/api/query/schema` describes every table and column, including the daily activity tables used by
+reports. Topics, data and arguments are JSON (`json_extract(data, '$.amount')`); 128-bit numbers
+are strings so they stay exact.
 
 Queries run on a separate read-only connection pool (`query_only`), so they cannot write even if
 they get past validation, and the analytics database contains no user data to reach. Example:
@@ -145,6 +163,28 @@ SELECT strftime('%H:%M', timestamp, 'unixepoch') AS minute,
 FROM blocks WHERE chain = 'stellar'
 GROUP BY minute ORDER BY minute;
 ```
+
+A contract's users per day, including those who reached it through routers or other contracts:
+
+```sql
+SELECT day, COUNT(*) AS users, SUM(direct_txs = 0) AS through_other_contracts
+FROM contract_reach_daily WHERE contract = 'C...'
+GROUP BY day ORDER BY day;
+```
+
+### Contract data
+
+For any Stellar contract (`C...`). The interface is read from the chain: the contract's instance,
+then its code, then the `contractspecv0` section the Soroban SDK embeds (functions with argument
+names and types, types, and events for SDK 23+). Stellar Asset Contracts get the standard token
+interface and their name and symbol. Interfaces are cached for a day.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/api/contracts/{id}/interface[?refresh=true]` | - | `{interface: {kind, wasm_hash, functions, events, types, meta, asset}}`; `404` if the contract doesn't exist |
+| GET | `/api/contracts/{id}/calls?limit=50` | - | Recent direct calls (collected hours) with `args` and `named_args` |
+| GET | `/api/contracts/{id}/events?name=&limit=50` | - | Recent events with `topics`, `data`, `token_move`, and `event`/`fields` named from the interface |
+| GET | `/api/contracts/{id}/activity?days=7` | - | Per day: direct callers, users reached (and how many only through other contracts), events by name, token flows; totals and event coverage |
 
 ### Traction reports
 
@@ -252,6 +292,7 @@ Errors are JSON: `{"success": false, "message": "..."}`.
 | Source | Used for | Endpoints |
 |--------|----------|-----------|
 | Stellar Horizon | Every ledger with its transactions and operations (collector), asset holders and supply (reports) | `horizon.stellar.org`, `horizon.stellar.lobstr.co` (failover in that order), or `horizon-testnet.stellar.org` |
+| Stellar RPC | Contract events of every ledger (collector), contract instances and code (interfaces) | Registry endpoints in `src/config/chains.json` (failover), `RPC_URL_STELLAR` first |
 | Starknet JSON-RPC | Starknet dashboard: latest block with receipts | `starknet-rpc.publicnode.com`, `starknet.api.onfinality.io/public`, `api.zan.top/public/starknet-mainnet` |
 | EVM, Solana and CometBFT JSON-RPC | Latest block, receipts and execution results for registry chains | Public endpoints listed per chain in `src/config/chains.json` |
 | Alchemy (optional) | EVM transaction history | Your own key |
@@ -298,6 +339,9 @@ Copy `.env.production` to `.env` and edit it, or set the variables in your host'
 | `ANALYTICS_STELLAR_BACKFILL` | `30` | no | Ledgers backfilled on first start |
 | `ANALYTICS_TX_RETENTION_HOURS` | `24` | no | How long Stellar transactions and operations are kept |
 | `ANALYTICS_BLOCK_RETENTION_DAYS` | `30` | no | How long blocks and dashboard history are kept |
+| `ANALYTICS_EVENTS` | `true` | no | Set `false` to stop collecting contract events |
+| `ANALYTICS_EVENT_RETENTION_HOURS` | `72` | no | How long raw events and token movements are kept |
+| `STELLAR_HORIZON_TIMEOUT_SECS` | `60` | no | Horizon request timeout (busy ledgers can take Horizon over 20 s per page) |
 | `BLOCRA_SIGNING_SECRET` | none | no | Stellar secret seed (`S...`) BlocRA signs traction reports with; enables `signed=true` and `/api/attestation/key` |
 | `RATE_LIMIT_MAX_REQUESTS` | `1000` | no | Requests allowed per client IP per window (`429` with `Retry-After` beyond it; `/api/health` is exempt) |
 | `RATE_LIMIT_WINDOW_SECS` | `900` | no | Rate-limit window in seconds |
@@ -397,6 +441,10 @@ src/
     reports.rs         traction reports for Soroban contracts and assets
     attestation.rs     Ed25519 signing of reports (BlocRA attestations)
     scval.rs           XDR decoding of contract-call parameters (contract id, function)
+    xdr_json.rs        Soroban values (ScVal) as JSON
+    soroban_rpc.rs     Stellar RPC: latest ledger, getEvents, getLedgerEntries
+    contract_events.rs event decoding and token movements (SEP-41, CAP-67)
+    contract_spec.rs   contract interfaces from WASM (contractspecv0); naming calls and events
     soroban_auth.rs    who authorized a contract call (Soroban auth entries; relayer-aware users)
     chains.rs          chain registry and generic JSON-RPC client for the other chains
     starknet.rs        Starknet JSON-RPC client (Starknet dashboard)
