@@ -119,11 +119,62 @@ pub fn normalize_subject(input: &str) -> String {
     }
 }
 
+/// Longest report period, in days.
+pub const MAX_REPORT_DAYS: i64 = 3650;
+
+/// The days a report covers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReportPeriod {
+    /// The last N days, ending on the latest collected day.
+    LastDays(i64),
+    /// Explicit UTC days, both included (the end is capped at the latest
+    /// collected day). `label` says what was asked for, e.g. "all", "1m".
+    Span { from: String, to: String, label: String },
+}
+
+/// The latest and earliest collected days.
+async fn collected_span(db: &sqlx::SqlitePool) -> Result<(String, String), AppError> {
+    let (first_day, last_day): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT MIN(day), MAX(day) FROM collected_days").fetch_one(db).await?;
+    let last_day = last_day.unwrap_or_else(|| day_of(now()));
+    let first_day = first_day.unwrap_or_else(|| last_day.clone());
+    Ok((first_day, last_day))
+}
+
+/// (from, to, days, label) of a period, given the latest collected day.
+fn resolve_period(period: &ReportPeriod, last_day: &str) -> Result<(String, String, i64, String), AppError> {
+    match period {
+        ReportPeriod::LastDays(n) => {
+            let days = (*n).clamp(1, MAX_REPORT_DAYS);
+            Ok((shift_day(last_day, -(days - 1)), last_day.to_string(), days, format!("{days}d")))
+        }
+        ReportPeriod::Span { from, to, label } => {
+            let to = if to.as_str() > last_day { last_day.to_string() } else { to.clone() };
+            let (Ok(f), Ok(t)) = (
+                chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d"),
+                chrono::NaiveDate::parse_from_str(&to, "%Y-%m-%d"),
+            ) else {
+                return Err(AppError::BadRequest("Report dates must be YYYY-MM-DD".into()));
+            };
+            let days = (t - f).num_days() + 1;
+            if days < 1 {
+                return Err(AppError::BadRequest(format!(
+                    "BlocRA has no collected data in that period (collected data ends on {last_day})"
+                )));
+            }
+            if days > MAX_REPORT_DAYS {
+                return Err(AppError::BadRequest(format!("Reports cover at most {MAX_REPORT_DAYS} days")));
+            }
+            Ok((from.clone(), to, days, label.clone()))
+        }
+    }
+}
+
 pub async fn traction_report(
     store: &Analytics,
     stellar: &StellarService,
     subject_input: &str,
-    days: i64,
+    period: &ReportPeriod,
     relayers: &[String],
 ) -> Result<Value, AppError> {
     let db = store.reader();
@@ -136,7 +187,6 @@ pub async fn traction_report(
     }
     let excl = exclusion(&relayers);
     let subject = normalize_subject(subject_input);
-    let days = days.clamp(1, 90);
 
     let kind = subject_kind(db, &subject).await?.ok_or_else(|| {
         AppError::NotFound(format!(
@@ -145,15 +195,12 @@ pub async fn traction_report(
         ))
     })?;
 
-    // The period ends on the latest collected day (UTC), which may be partial.
-    let (first_day, last_day): (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT MIN(day), MAX(day) FROM collected_days").fetch_one(db).await?;
-    let last_day = last_day.unwrap_or_else(|| day_of(now()));
-    let first_day = first_day.unwrap_or_else(|| last_day.clone());
-    let from = shift_day(&last_day, -(days - 1));
+    // Periods end at the latest collected day (UTC), which may be partial.
+    let (first_day, last_day) = collected_span(db).await?;
+    let (from, to, days, range_label) = resolve_period(period, &last_day)?;
     let prev_to = shift_day(&from, -1);
     let prev_from = shift_day(&from, -days);
-    let period = Period { from: &from, to: &last_day };
+    let period = Period { from: &from, to: &to };
     let previous = Period { from: &prev_from, to: &prev_to };
     let has_previous = first_day.as_str() <= prev_to.as_str();
 
@@ -434,7 +481,7 @@ pub async fn traction_report(
         "subject": { "id": subject, "kind": kind, "label": label(&subject, &kind) },
         "network": stellar.network,
         "generated_at": chrono::Utc::now().to_rfc3339(),
-        "period": { "days": days, "from": period.from, "to": period.to,
+        "period": { "days": days, "from": period.from, "to": period.to, "range": range_label,
                     "previous_from": previous.from, "previous_to": previous.to, "has_previous": has_previous },
         "kpis": kpis,
         "daily": daily,
@@ -497,11 +544,10 @@ fn methodology(kind: &str) -> Vec<String> {
 }
 
 /// Most active subjects of a kind over the last `days` days, for pickers.
-pub async fn top_subjects(store: &Analytics, kind: &str, days: i64, limit: i64) -> Result<Vec<Value>, AppError> {
+pub async fn top_subjects(store: &Analytics, kind: &str, period: &ReportPeriod, limit: i64) -> Result<Vec<Value>, AppError> {
     let db = store.reader();
-    let last: Option<String> = sqlx::query_scalar("SELECT MAX(day) FROM collected_days").fetch_one(db).await?;
-    let last = last.unwrap_or_else(|| day_of(now()));
-    let from = shift_day(&last, -(days.clamp(1, 90) - 1));
+    let (_, last_day) = collected_span(db).await?;
+    let (from, last, _, _) = resolve_period(period, &last_day)?;
     let rows: Vec<(String, i64, i64, f64)> = sqlx::query_as(
         "SELECT subject, COUNT(DISTINCT account) AS a, SUM(calls), SUM(volume) FROM activity_daily
          WHERE kind = ? AND day BETWEEN ? AND ? GROUP BY subject ORDER BY a DESC LIMIT ?",
@@ -521,6 +567,24 @@ pub async fn top_subjects(store: &Analytics, kind: &str, days: i64, limit: i64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_report_periods() {
+        let last = "2026-11-16";
+        let r = resolve_period(&ReportPeriod::LastDays(7), last).unwrap();
+        assert_eq!(r, ("2026-11-10".into(), last.into(), 7, "7d".into()));
+        assert_eq!(resolve_period(&ReportPeriod::LastDays(1), last).unwrap().0, last);
+        assert_eq!(resolve_period(&ReportPeriod::LastDays(99_999), last).unwrap().2, MAX_REPORT_DAYS);
+        let span = |f: &str, t: &str| ReportPeriod::Span { from: f.into(), to: t.into(), label: "custom".into() };
+        assert_eq!(resolve_period(&span("2026-11-01", "2026-11-03"), last).unwrap().2, 3);
+        // The end is capped at the latest collected day.
+        let capped = resolve_period(&span("2026-11-10", "2026-12-31"), last).unwrap();
+        assert_eq!((capped.1.as_str(), capped.2), (last, 7));
+        // Entirely after the collected data, or nonsense dates: refused.
+        assert!(resolve_period(&span("2026-11-20", "2026-11-25"), last).is_err());
+        assert!(resolve_period(&span("nope", "2026-11-25"), last).is_err());
+        assert!(resolve_period(&span("2000-01-01", last), last).is_err(), "longer than the maximum");
+    }
 
     #[test]
     fn normalizes_subjects() {

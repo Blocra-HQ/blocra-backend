@@ -6,8 +6,12 @@
 //!   named from the interface.
 //! - GET /api/contracts/{id}/events?name=&limit=50: recent events, fields
 //!   named from the interface, token movements decoded.
-//! - GET /api/contracts/{id}/activity?days=7: daily callers, users reached
-//!   through other contracts, events and token flows.
+//! - GET /api/contracts/{id}/activity?range=7d: callers, users reached
+//!   through other contracts, events and token flows, per hour or per day.
+//!
+//! Every list and the activity take a time frame: `range` (`24h`, `7d`,
+//! `1m`, `1y`, `all`, `today`, ...) or `from`/`to` (dates, ISO times or unix
+//! seconds); see services::time_range.
 
 use actix_web::{web, HttpResponse, ResponseError};
 use serde::Deserialize;
@@ -17,6 +21,22 @@ use crate::errors::AppError;
 use crate::services::analytics::{self, Analytics};
 use crate::services::contract_spec;
 use crate::services::soroban_rpc::SorobanRpc;
+use crate::services::time_range::{self, TimeFrame};
+
+/// The time frame of a request; `None` when none was given and `optional`.
+async fn frame(
+    store: &Analytics,
+    range: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    optional: bool,
+) -> Result<Option<TimeFrame>, AppError> {
+    if optional && range.is_none() && from.is_none() && to.is_none() {
+        return Ok(None);
+    }
+    let start = store.data_start().await?;
+    time_range::parse(range, from, to, analytics::now(), start).map(Some)
+}
 
 /// Interfaces are re-read after a day, since contracts can be upgraded.
 const INTERFACE_TTL_SECS: i64 = 86_400;
@@ -90,6 +110,15 @@ async fn interface(
 struct ListQuery {
     limit: Option<i64>,
     name: Option<String>,
+    range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+}
+
+impl ListQuery {
+    async fn window(&self, store: &Analytics) -> Result<Option<(i64, i64)>, AppError> {
+        Ok(frame(store, self.range.as_deref(), self.from.as_deref(), self.to.as_deref(), true).await?.map(|f| (f.from, f.to)))
+    }
 }
 
 async fn calls(
@@ -100,7 +129,8 @@ async fn calls(
 ) -> HttpResponse {
     let result = async {
         let id = contract_id(&path)?;
-        let mut calls = store.contract_calls(&id, q.limit.unwrap_or(50)).await?;
+        let window = q.window(&store).await?;
+        let mut calls = store.contract_calls(&id, window, q.limit.unwrap_or(50)).await?;
         if let Some(i) = interface_for_naming(&store, &rpc, &id).await {
             for c in &mut calls {
                 let args = c["args"].as_array().cloned().unwrap_or_default();
@@ -124,7 +154,8 @@ async fn events(
 ) -> HttpResponse {
     let result = async {
         let id = contract_id(&path)?;
-        let mut events = store.contract_events(&id, q.name.as_deref(), q.limit.unwrap_or(50)).await?;
+        let window = q.window(&store).await?;
+        let mut events = store.contract_events(&id, q.name.as_deref(), window, q.limit.unwrap_or(50)).await?;
         let interface = interface_for_naming(&store, &rpc, &id).await;
         for e in &mut events {
             let topics = e["topics"].as_array().cloned().unwrap_or_default();
@@ -156,13 +187,25 @@ async fn events(
 
 #[derive(Deserialize)]
 struct ActivityQuery {
+    /// Legacy: the last N days (same as range=Nd).
     days: Option<i64>,
+    range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    /// hour or day (default: hour for recent frames up to 72h).
+    interval: Option<String>,
 }
 
 async fn activity(path: web::Path<String>, q: web::Query<ActivityQuery>, store: web::Data<Analytics>) -> HttpResponse {
     let result = async {
         let id = contract_id(&path)?;
-        Ok::<_, AppError>(store.contract_activity(&id, q.days.unwrap_or(7)).await?)
+        let days_range = q.days.map(|d| format!("{d}d"));
+        if days_range.is_some() && (q.range.is_some() || q.from.is_some()) {
+            return Err(AppError::BadRequest("Give either days, range or from/to".into()));
+        }
+        let range = days_range.as_deref().or(q.range.as_deref());
+        let frame = frame(&store, range, q.from.as_deref(), q.to.as_deref(), false).await?.ok_or_else(|| AppError::BadRequest("No time frame".into()))?;
+        store.contract_activity(&id, &frame, q.interval.as_deref()).await
     }
     .await;
     match result {

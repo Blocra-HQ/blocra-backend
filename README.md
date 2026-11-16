@@ -182,9 +182,9 @@ interface and their name and symbol. Interfaces are cached for a day.
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | GET | `/api/contracts/{id}/interface[?refresh=true]` | - | `{interface: {kind, wasm_hash, functions, events, types, meta, asset}}`; `404` if the contract doesn't exist |
-| GET | `/api/contracts/{id}/calls?limit=50` | - | Recent direct calls (collected hours) with `args` and `named_args` |
-| GET | `/api/contracts/{id}/events?name=&limit=50` | - | Recent events with `topics`, `data`, `token_move`, and `event`/`fields` named from the interface |
-| GET | `/api/contracts/{id}/activity?days=7` | - | Per day: direct callers, users reached (and how many only through other contracts), events by name, token flows; totals and event coverage |
+| GET | `/api/contracts/{id}/calls?limit=50[&range=24h]` | - | Recent direct calls (collected hours) with `args` and `named_args` |
+| GET | `/api/contracts/{id}/events?name=&limit=50[&range=1h]` | - | Recent events with `topics`, `data`, `token_move`, and `event`/`fields` named from the interface |
+| GET | `/api/contracts/{id}/activity?range=7d` | - | Any time frame: `range` (`24h`, `today`, `7d`, `1m`, `1y`, `all`, ...) or `from`/`to` (dates, ISO times, unix seconds); per hour for recent frames up to 72h (raw data still kept), else per UTC day; `interval=hour\|day` forces one. Per period: direct callers, users reached (and how many only through other contracts), events by name, token flows; totals and event coverage |
 
 ### Traction reports
 
@@ -195,7 +195,7 @@ sentences over those figures; nothing is estimated or written by a model.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET | `/api/reports/traction?subject=<id>&days=7` | - | The report (`days` 1-90). `404` when the subject has no recorded activity |
+| GET | `/api/reports/traction?subject=<id>&days=7` | - | The report: `days` (1-3650), or `range` (`today`, `7d`, `1m`, `1y`, `all`, ...), or `from`/`to` dates; always whole UTC days. `404` when the subject has no recorded activity |
 | GET | `/api/reports/subjects?kind=contract\|asset&days=7&limit=20` | - | Most active contracts or assets, for pickers |
 | GET | `/api/reports/traction?...&signed=true` | - | The report signed by BlocRA: `{signed: {report_json, attestation}}`; `503` without `BLOCRA_SIGNING_SECRET` |
 | GET | `/api/attestation/key` | - | The signing public key (Stellar `G...`), algorithm, method version and supported chains |

@@ -6,7 +6,8 @@ use serde_json::json;
 use crate::errors::AppError;
 use crate::services::analytics::Analytics;
 use crate::services::attestation::{Attestor, METHOD_VERSION};
-use crate::services::reports;
+use crate::services::reports::{self, ReportPeriod};
+use crate::services::time_range;
 use crate::services::stellar::StellarService;
 
 /// Chains traction reports support today. The CLI and API take a chain so
@@ -45,7 +46,54 @@ async fn signing_key(attestor: web::Data<Attestor>) -> HttpResponse {
 struct SubjectsQuery {
     kind: Option<String>,
     days: Option<i64>,
+    range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
     limit: Option<i64>,
+}
+
+/// The report period from `days` (the last N days, as before), `range`
+/// (`today`, `7d`, `2w`, `1m`, `1y`, `all`, ...) or `from`/`to` dates.
+/// Reports cover whole UTC days; a range is widened to the days it touches.
+async fn report_period(
+    store: &Analytics,
+    days: Option<i64>,
+    range: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<ReportPeriod, AppError> {
+    let custom = range.is_some() || from.is_some() || to.is_some();
+    if let Some(d) = days {
+        if custom {
+            return Err(AppError::BadRequest("Give either days, range or from/to".into()));
+        }
+        if !(1..=reports::MAX_REPORT_DAYS).contains(&d) {
+            return Err(AppError::BadRequest(format!("days must be 1 to {}", reports::MAX_REPORT_DAYS)));
+        }
+        return Ok(ReportPeriod::LastDays(d));
+    }
+    let frame = time_range::parse(range, from, to, crate::services::analytics::now(), store.data_start().await?)?;
+    let label = frame.label.as_str();
+    // "7d" and "today" keep meaning the last N collected days.
+    if label == "today" {
+        return Ok(ReportPeriod::LastDays(1));
+    }
+    if let Some(n) = label.strip_suffix('d').and_then(|n| n.parse::<i64>().ok()) {
+        if n > reports::MAX_REPORT_DAYS {
+            return Err(AppError::BadRequest(format!("Reports cover at most {} days", reports::MAX_REPORT_DAYS)));
+        }
+        return Ok(ReportPeriod::LastDays(n));
+    }
+    let span = frame.report_days();
+    Ok(ReportPeriod::Span { from: span.from, to: span.to, label: frame.label })
+}
+
+fn failure(e: AppError) -> HttpResponse {
+    match e {
+        AppError::NotFound(m) => HttpResponse::NotFound().json(json!({ "success": false, "message": m })),
+        AppError::BadRequest(m) => HttpResponse::BadRequest().json(json!({ "success": false, "message": m })),
+        e => e.error_response(),
+    }
 }
 
 /// GET /api/reports/subjects?kind=contract|asset&days=7&limit=20
@@ -54,9 +102,13 @@ async fn subjects(store: web::Data<Analytics>, q: web::Query<SubjectsQuery>) -> 
         "asset" => "asset",
         _ => "contract",
     };
-    match reports::top_subjects(&store, kind, q.days.unwrap_or(7), q.limit.unwrap_or(20)).await {
+    let period = match report_period(&store, q.days, q.range.as_deref(), q.from.as_deref(), q.to.as_deref()).await {
+        Ok(p) => p,
+        Err(e) => return failure(e),
+    };
+    match reports::top_subjects(&store, kind, &period, q.limit.unwrap_or(20)).await {
         Ok(list) => HttpResponse::Ok().json(json!({ "success": true, "kind": kind, "subjects": list })),
-        Err(e) => e.error_response(),
+        Err(e) => failure(e),
     }
 }
 
@@ -64,6 +116,9 @@ async fn subjects(store: web::Data<Analytics>, q: web::Query<SubjectsQuery>) -> 
 struct TractionQuery {
     subject: String,
     days: Option<i64>,
+    range: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
     chain: Option<String>,
     signed: Option<bool>,
     /// Comma-separated relayer accounts the project runs.
@@ -71,6 +126,7 @@ struct TractionQuery {
 }
 
 /// GET /api/reports/traction?subject=C...|XLM|CODE:ISSUER&days=7[&chain=stellar][&signed=true]
+/// (or range=today|7d|2w|1m|1y|all, or from=YYYY-MM-DD[&to=YYYY-MM-DD] instead of days)
 ///
 /// With signed=true the response is `{success, signed: {report_json, attestation}}`,
 /// where attestation is BlocRA's Ed25519 signature over report_json.
@@ -92,11 +148,13 @@ async fn traction(
         .as_deref()
         .map(|r| r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
         .unwrap_or_default();
-    let report = match reports::traction_report(&store, &stellar, &q.subject, q.days.unwrap_or(7), &relayers).await {
+    let period = match report_period(&store, q.days, q.range.as_deref(), q.from.as_deref(), q.to.as_deref()).await {
+        Ok(p) => p,
+        Err(e) => return failure(e),
+    };
+    let report = match reports::traction_report(&store, &stellar, &q.subject, &period, &relayers).await {
         Ok(r) => r,
-        Err(AppError::NotFound(m)) => return HttpResponse::NotFound().json(json!({ "success": false, "message": m })),
-        Err(AppError::BadRequest(m)) => return HttpResponse::BadRequest().json(json!({ "success": false, "message": m })),
-        Err(e) => return e.error_response(),
+        Err(e) => return failure(e),
     };
     if q.signed.unwrap_or(false) {
         return match attestor.sign(&report) {

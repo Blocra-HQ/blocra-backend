@@ -13,3 +13,4 @@ pub mod xdr_json;
 pub mod contract_events;
 pub mod contract_spec;
 pub mod soroban_rpc;
+pub mod time_range;

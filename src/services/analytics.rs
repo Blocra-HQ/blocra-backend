@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::errors::AppError;
 use crate::services::contract_events::DecodedEvent;
+use crate::services::time_range::TimeFrame;
 use crate::services::stellar::{HorizonOperation, HorizonTransaction};
 use std::collections::{HashMap, HashSet};
 
@@ -418,6 +419,7 @@ impl Analytics {
         for col in ["first_ledger INTEGER", "last_ledger INTEGER", "first_ts INTEGER", "last_ts INTEGER", "event_ledgers INTEGER NOT NULL DEFAULT 0"] {
             let _ = sqlx::query(&format!("ALTER TABLE collected_days ADD COLUMN {col}")).execute(&rw).await;
         }
+        let _ = sqlx::query("ALTER TABLE blocks ADD COLUMN events_collected INTEGER NOT NULL DEFAULT 0").execute(&rw).await;
         sqlx::raw_sql("CREATE INDEX IF NOT EXISTS operations_by_contract ON operations (contract)")
             .execute(&rw)
             .await?;
@@ -653,6 +655,12 @@ impl Analytics {
             .await?;
         }
 
+        if events.is_some() {
+            sqlx::query("UPDATE blocks SET events_collected = 1 WHERE chain = 'stellar' AND block_number = ?")
+                .bind(ledger)
+                .execute(&mut *tx)
+                .await?;
+        }
         sqlx::query(
             "INSERT INTO collected_days (day, ledgers, first_ledger, last_ledger, first_ts, last_ts, event_ledgers) VALUES (?, 1, ?, ?, ?, ?, ?)
              ON CONFLICT (day) DO UPDATE SET ledgers = ledgers + 1, event_ledgers = event_ledgers + excluded.event_ledgers,
@@ -670,6 +678,15 @@ impl Analytics {
         .execute(&mut *tx)
         .await?;
         tx.commit().await
+    }
+
+    /// When collected Stellar data starts (unix seconds), the start of `all`.
+    pub async fn data_start(&self) -> Result<Option<i64>, sqlx::Error> {
+        let first: Option<i64> = sqlx::query_scalar("SELECT MIN(first_ts) FROM collected_days").fetch_one(&self.rw).await?;
+        match first {
+            Some(t) => Ok(Some(t)),
+            None => sqlx::query_scalar("SELECT MIN(timestamp) FROM blocks WHERE chain = 'stellar'").fetch_one(&self.rw).await,
+        }
     }
 
     /// A contract interface read before, and when (unix seconds).
@@ -700,18 +717,27 @@ impl Analytics {
 
     /// The newest events a contract emitted (optionally one event name), with
     /// the token movement each one is, if any.
-    pub async fn contract_events(&self, contract: &str, name: Option<&str>, limit: i64) -> Result<Vec<Value>, sqlx::Error> {
+    pub async fn contract_events(
+        &self,
+        contract: &str,
+        name: Option<&str>,
+        window: Option<(i64, i64)>,
+        limit: i64,
+    ) -> Result<Vec<Value>, sqlx::Error> {
+        let (from, to) = window.unwrap_or((i64::MIN, i64::MAX));
         let rows: Vec<EventRow> =
             sqlx::query_as(
                 "SELECT e.id, e.block_number, e.timestamp, e.tx_hash, e.name, e.topics, e.data, e.user_account,
                         t.kind, t.from_address, t.to_address, t.amount, t.asset
                  FROM events e LEFT JOIN token_transfers t ON t.chain = e.chain AND t.id = e.id
-                 WHERE e.contract = ? AND (? IS NULL OR e.name = ?)
+                 WHERE e.contract = ? AND (? IS NULL OR e.name = ?) AND e.timestamp >= ? AND e.timestamp < ?
                  ORDER BY e.block_number DESC, e.id DESC LIMIT ?",
             )
             .bind(contract)
             .bind(name)
             .bind(name)
+            .bind(from)
+            .bind(to)
             .bind(limit.clamp(1, 500))
             .fetch_all(&self.rw)
             .await?;
@@ -730,13 +756,16 @@ impl Analytics {
     }
 
     /// The newest direct calls to a contract, with their arguments.
-    pub async fn contract_calls(&self, contract: &str, limit: i64) -> Result<Vec<Value>, sqlx::Error> {
+    pub async fn contract_calls(&self, contract: &str, window: Option<(i64, i64)>, limit: i64) -> Result<Vec<Value>, sqlx::Error> {
+        let (from, to) = window.unwrap_or((i64::MIN, i64::MAX));
         let rows: Vec<CallRow> = sqlx::query_as(
             "SELECT o.id, o.block_number, o.timestamp, o.tx_hash, o.function, o.args, o.user_account, o.relayed, t.successful
              FROM operations o LEFT JOIN transactions t ON t.chain = o.chain AND t.hash = o.tx_hash
-             WHERE o.contract = ? ORDER BY o.block_number DESC, o.id DESC LIMIT ?",
+             WHERE o.contract = ? AND o.timestamp >= ? AND o.timestamp < ? ORDER BY o.block_number DESC, o.id DESC LIMIT ?",
         )
         .bind(contract)
+        .bind(from)
+        .bind(to)
         .bind(limit.clamp(1, 500))
         .fetch_all(&self.rw)
         .await?;
@@ -753,74 +782,192 @@ impl Analytics {
             .collect())
     }
 
-    /// Daily activity of a contract over the last `days` UTC days: direct
-    /// callers, everyone it reached (through other contracts too), its events
-    /// and the tokens it received and sent.
-    pub async fn contract_activity(&self, contract: &str, days: i64) -> Result<Value, sqlx::Error> {
-        let days = days.clamp(1, 90);
-        let since = day_of(now() - (days - 1) * 86_400);
+    /// Activity of a contract over a time frame: direct callers, everyone
+    /// it reached (through other contracts too), its events and the tokens
+    /// it received and sent.
+    ///
+    /// Short recent frames are answered per hour from the raw tables, the
+    /// rest per UTC day from the daily tables (whole days, so the first and
+    /// last day may extend past the frame). `interval` forces `hour` or
+    /// `day`; `hour` needs the frame's raw data to still be kept.
+    pub async fn contract_activity(&self, contract: &str, frame: &TimeFrame, interval: Option<&str>) -> Result<Value, AppError> {
+        let raw_from = now() - env_i64("ANALYTICS_TX_RETENTION_HOURS", 24) * 3600;
+        let raw_ok = frame.from >= raw_from;
+        let hourly = match interval {
+            Some("hour") if raw_ok => true,
+            Some("hour") => {
+                return Err(AppError::BadRequest(format!(
+                    "Hourly figures are only kept for the last {} hours; use interval=day for this time frame",
+                    env_i64("ANALYTICS_TX_RETENTION_HOURS", 24)
+                )))
+            }
+            Some("day") => false,
+            Some(other) => return Err(AppError::BadRequest(format!("interval must be hour or day, not \"{other}\""))),
+            None => raw_ok && frame.seconds() <= 72 * 3600,
+        };
+        let mut out = if hourly { self.activity_hourly(contract, frame).await? } else { self.activity_daily(contract, frame).await? };
+        out["contract"] = json!(contract);
+        out["frame"] = json!({
+            "label": frame.label, "all_time": frame.all_time,
+            "from": frame.from, "to": frame.to,
+            "from_iso": iso(frame.from), "to_iso": iso(frame.to),
+        });
+        out["interval"] = json!(if hourly { "hour" } else { "day" });
+        out["users_indirect_only"] = json!(out["users_reached"].as_i64().unwrap_or(0) - out["users_direct"].as_i64().unwrap_or(0));
+        Ok(out)
+    }
+
+    async fn activity_daily(&self, contract: &str, frame: &TimeFrame) -> Result<Value, sqlx::Error> {
+        let span = frame.days();
+        let (since, until) = (span.from.as_str(), span.to.as_str());
         let direct: Vec<(String, i64, i64, i64)> = sqlx::query_as(
             "SELECT day, COUNT(*), SUM(calls), SUM(failed) FROM activity_daily
-             WHERE subject = ? AND kind = 'contract' AND day >= ? GROUP BY day ORDER BY day",
+             WHERE subject = ? AND kind = 'contract' AND day BETWEEN ? AND ? GROUP BY day ORDER BY day",
         )
         .bind(contract)
-        .bind(&since)
+        .bind(since)
+        .bind(until)
         .fetch_all(&self.rw)
         .await?;
         let reach: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(
             "SELECT day, COUNT(*), SUM(direct_txs > 0), SUM(txs), SUM(direct_txs) FROM contract_reach_daily
-             WHERE contract = ? AND day >= ? GROUP BY day ORDER BY day",
+             WHERE contract = ? AND day BETWEEN ? AND ? GROUP BY day ORDER BY day",
         )
         .bind(contract)
-        .bind(&since)
+        .bind(since)
+        .bind(until)
         .fetch_all(&self.rw)
         .await?;
         let totals: (i64, i64) = sqlx::query_as(
             "SELECT COUNT(DISTINCT account), COUNT(DISTINCT CASE WHEN direct_txs > 0 THEN account END)
-             FROM contract_reach_daily WHERE contract = ? AND day >= ?",
+             FROM contract_reach_daily WHERE contract = ? AND day BETWEEN ? AND ?",
         )
         .bind(contract)
-        .bind(&since)
+        .bind(since)
+        .bind(until)
         .fetch_one(&self.rw)
         .await?;
         let events: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT day, name, events FROM event_daily WHERE contract = ? AND day >= ? ORDER BY day, events DESC",
+            "SELECT day, name, events FROM event_daily WHERE contract = ? AND day BETWEEN ? AND ? ORDER BY day, events DESC",
         )
         .bind(contract)
-        .bind(&since)
+        .bind(since)
+        .bind(until)
         .fetch_all(&self.rw)
         .await?;
         let flows: Vec<(String, String, f64, f64, i64, i64)> = sqlx::query_as(
             "SELECT day, token, received, sent, transfers_in, transfers_out FROM token_flow_daily
-             WHERE address = ? AND day >= ? ORDER BY day, token",
+             WHERE address = ? AND day BETWEEN ? AND ? ORDER BY day, token",
         )
         .bind(contract)
-        .bind(&since)
+        .bind(since)
+        .bind(until)
         .fetch_all(&self.rw)
         .await?;
         let coverage: (Option<i64>, Option<i64>) =
-            sqlx::query_as("SELECT SUM(ledgers), SUM(event_ledgers) FROM collected_days WHERE day >= ?")
-                .bind(&since)
+            sqlx::query_as("SELECT SUM(ledgers), SUM(event_ledgers) FROM collected_days WHERE day BETWEEN ? AND ?")
+                .bind(since)
+                .bind(until)
                 .fetch_one(&self.rw)
                 .await?;
-        Ok(json!({
-            "contract": contract,
-            "since": since,
-            "days": days,
-            "users_reached": totals.0,
-            "users_direct": totals.1,
-            "users_indirect_only": totals.0 - totals.1,
-            "direct_calls": direct.iter().map(|(d, users, calls, failed)| json!({ "day": d, "users": users, "calls": calls, "failed": failed })).collect::<Vec<_>>(),
-            "reach": reach.iter().map(|(d, users, direct_users, txs, direct_txs)| json!({
-                "day": d, "users": users, "direct_users": direct_users, "indirect_only_users": users - direct_users,
-                "txs": txs, "direct_txs": direct_txs,
-            })).collect::<Vec<_>>(),
-            "events": events.iter().map(|(d, n, c)| json!({ "day": d, "name": n, "events": c })).collect::<Vec<_>>(),
-            "token_flows": flows.iter().map(|(d, t, r, s, i, o)| json!({
-                "day": d, "token": t, "received": r, "sent": s, "net": r - s, "transfers_in": i, "transfers_out": o,
-            })).collect::<Vec<_>>(),
-            "coverage": { "ledgers": coverage.0.unwrap_or(0), "ledgers_with_events": coverage.1.unwrap_or(0) },
-        }))
+        Ok(activity_json(
+            json!({ "from": since, "to": until, "days": span.days }),
+            totals,
+            direct.into_iter().map(|(d, u, c, f)| (d, u, c, f)).collect(),
+            reach,
+            events,
+            flows,
+            coverage.0.unwrap_or(0),
+            coverage.1.unwrap_or(0),
+            (span.days as f64 * LEDGERS_PER_DAY).round() as i64,
+        ))
+    }
+
+    async fn activity_hourly(&self, contract: &str, frame: &TimeFrame) -> Result<Value, sqlx::Error> {
+        let (from, to) = (frame.from, frame.to);
+        let hour = |ts: i64| iso(ts - ts.rem_euclid(3600));
+        let direct: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+            "SELECT o.timestamp - (o.timestamp % 3600) AS h, COUNT(DISTINCT o.user_account), COUNT(*), COALESCE(SUM(t.successful = 0), 0)
+             FROM operations o LEFT JOIN transactions t ON t.chain = o.chain AND t.hash = o.tx_hash
+             WHERE o.contract = ?1 AND o.timestamp >= ?2 AND o.timestamp < ?3 GROUP BY h ORDER BY h",
+        )
+        .bind(contract)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.rw)
+        .await?;
+        // Every (transaction, user) that touched the contract: a successful
+        // direct call, an event it emitted, or tokens it received or sent.
+        const TOUCHED: &str = "WITH touched AS (
+                SELECT o.tx_hash, o.user_account AS account, o.timestamp AS ts, 1 AS direct
+                FROM operations o JOIN transactions t ON t.chain = o.chain AND t.hash = o.tx_hash AND t.successful = 1
+                WHERE o.contract = ?1 AND o.timestamp >= ?2 AND o.timestamp < ?3
+                UNION ALL SELECT tx_hash, user_account, timestamp, 0 FROM events
+                WHERE contract = ?1 AND timestamp >= ?2 AND timestamp < ?3
+                UNION ALL SELECT tx_hash, user_account, timestamp, 0 FROM token_transfers
+                WHERE (to_address = ?1 OR from_address = ?1) AND timestamp >= ?2 AND timestamp < ?3
+            ), per_tx AS (
+                SELECT tx_hash, account, MIN(ts) AS ts, MAX(direct) AS direct FROM touched
+                WHERE account IS NOT NULL GROUP BY tx_hash, account
+            )";
+        let reach: Vec<(i64, i64, i64, i64, i64)> = sqlx::query_as(&format!(
+            "{TOUCHED} SELECT ts - (ts % 3600) AS h, COUNT(DISTINCT account), COUNT(DISTINCT CASE WHEN direct = 1 THEN account END),
+                    COUNT(*), SUM(direct) FROM per_tx GROUP BY h ORDER BY h"
+        ))
+        .bind(contract)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.rw)
+        .await?;
+        let totals: (i64, i64) = sqlx::query_as(&format!(
+            "{TOUCHED} SELECT COUNT(DISTINCT account), COUNT(DISTINCT CASE WHEN direct = 1 THEN account END) FROM per_tx"
+        ))
+        .bind(contract)
+        .bind(from)
+        .bind(to)
+        .fetch_one(&self.rw)
+        .await?;
+        let events: Vec<(i64, String, i64)> = sqlx::query_as(
+            "SELECT timestamp - (timestamp % 3600) AS h, COALESCE(name, '(unnamed)'), COUNT(*) FROM events
+             WHERE contract = ?1 AND timestamp >= ?2 AND timestamp < ?3 GROUP BY h, 2 ORDER BY h, 3 DESC",
+        )
+        .bind(contract)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.rw)
+        .await?;
+        let flows: Vec<(i64, String, f64, f64, i64, i64)> = sqlx::query_as(
+            "SELECT timestamp - (timestamp % 3600) AS h, token,
+                    COALESCE(SUM(CASE WHEN to_address = ?1 THEN amount_raw END), 0.0),
+                    COALESCE(SUM(CASE WHEN from_address = ?1 THEN amount_raw END), 0.0),
+                    SUM(to_address = ?1), SUM(from_address = ?1)
+             FROM token_transfers WHERE (to_address = ?1 OR from_address = ?1) AND timestamp >= ?2 AND timestamp < ?3
+             GROUP BY h, token ORDER BY h, token",
+        )
+        .bind(contract)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.rw)
+        .await?;
+        let coverage: (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(SUM(events_collected), 0) FROM blocks
+             WHERE chain = 'stellar' AND timestamp >= ? AND timestamp < ?",
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_one(&self.rw)
+        .await?;
+        Ok(activity_json(
+            json!({ "from": iso(from), "to": iso(to), "hours": ((to - from) as f64 / 3600.0 * 10.0).round() / 10.0 }),
+            totals,
+            direct.into_iter().map(|(h, u, c, f)| (hour(h), u, c, f)).collect(),
+            reach.into_iter().map(|(h, u, du, t, dt)| (hour(h), u, du, t, dt)).collect(),
+            events.into_iter().map(|(h, n, c)| (hour(h), n, c)).collect(),
+            flows.into_iter().map(|(h, t, r, s, i, o)| (hour(h), t, r, s, i, o)).collect(),
+            coverage.0,
+            coverage.1,
+            ((to - from) as f64 / 86_400.0 * LEDGERS_PER_DAY).round() as i64,
+        ))
     }
 
     /// The pool reports and other read-only internal queries use.
@@ -995,6 +1142,53 @@ async fn add_activity(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, a: Activity<
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Stellar closes a ledger about every 5.8 seconds.
+const LEDGERS_PER_DAY: f64 = 86_400.0 / 5.8;
+
+fn env_i64(key: &str, default: i64) -> i64 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// ISO 8601 UTC time of a unix timestamp.
+fn iso(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0).map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default()
+}
+
+/// The activity response: every series keyed by `period` (a day or an hour).
+#[allow(clippy::too_many_arguments)]
+fn activity_json(
+    span: Value,
+    totals: (i64, i64),
+    direct: Vec<(String, i64, i64, i64)>,
+    reach: Vec<(String, i64, i64, i64, i64)>,
+    events: Vec<(String, String, i64)>,
+    flows: Vec<(String, String, f64, f64, i64, i64)>,
+    ledgers: i64,
+    ledgers_with_events: i64,
+    expected_ledgers: i64,
+) -> Value {
+    json!({
+        "span": span,
+        "users_reached": totals.0,
+        "users_direct": totals.1,
+        "direct_calls": direct.iter().map(|(p, users, calls, failed)| json!({ "period": p, "users": users, "calls": calls, "failed": failed })).collect::<Vec<_>>(),
+        "reach": reach.iter().map(|(p, users, direct_users, txs, direct_txs)| json!({
+            "period": p, "users": users, "direct_users": direct_users, "indirect_only_users": users - direct_users,
+            "txs": txs, "direct_txs": direct_txs,
+        })).collect::<Vec<_>>(),
+        "events": events.iter().map(|(p, n, c)| json!({ "period": p, "name": n, "events": c })).collect::<Vec<_>>(),
+        "token_flows": flows.iter().map(|(p, t, r, s, i, o)| json!({
+            "period": p, "token": t, "received": r, "sent": s, "net": r - s, "transfers_in": i, "transfers_out": o,
+        })).collect::<Vec<_>>(),
+        "coverage": {
+            "ledgers": ledgers,
+            "ledgers_with_events": ledgers_with_events,
+            "expected_ledgers": expected_ledgers,
+            "completeness_pct": if expected_ledgers > 0 { ((ledgers as f64 / expected_ledgers as f64 * 1000.0).round() / 10.0).min(100.0) } else { 0.0 },
+        },
+    })
 }
 
 /// UTC calendar day of a unix timestamp, e.g. "2026-11-06".
@@ -1258,12 +1452,45 @@ mod tests {
         assert_eq!(by(token)["direct_txs"], json!(0));
         assert_eq!(q("SELECT event_ledgers FROM collected_days").await[0]["event_ledgers"], json!(1));
 
-        let act = a.contract_activity(pool, 7).await.unwrap();
+        let week = crate::services::time_range::parse(Some("7d"), None, None, now(), None).unwrap();
+        let act = a.contract_activity(pool, &week, None).await.unwrap();
+        assert_eq!(act["interval"], "day");
         assert_eq!(act["users_indirect_only"], json!(1));
         assert_eq!(act["token_flows"][0]["net"], json!(100.0));
-        let listed = a.contract_events(token, None, 10).await.unwrap();
+        let listed = a.contract_events(token, None, None, 10).await.unwrap();
         assert_eq!(listed[0]["token_move"]["amount"], json!("100"));
-        assert_eq!(a.contract_calls(&router, 10).await.unwrap()[0]["args"], json!(["100"]));
+        assert_eq!(a.contract_calls(&router, None, 10).await.unwrap()[0]["args"], json!(["100"]));
+
+        // Time frames: a recent short frame is answered per hour from the raw tables.
+        let start = a.data_start().await.unwrap();
+        assert_eq!(start, Some(ts));
+        let frame = |r: &str| crate::services::time_range::parse(Some(r), None, None, now() + 1, start).unwrap();
+        let hourly = a.contract_activity(pool, &frame("24h"), None).await.unwrap();
+        assert_eq!(hourly["interval"], "hour");
+        assert_eq!((hourly["users_reached"].clone(), hourly["users_direct"].clone()), (json!(1), json!(0)));
+        assert_eq!(hourly["reach"][0]["indirect_only_users"], json!(1));
+        assert_eq!(hourly["token_flows"][0]["received"], json!(100.0));
+        assert_eq!(hourly["events"][0]["name"], "swap");
+        assert_eq!(hourly["coverage"]["ledgers"], json!(1));
+        assert_eq!(hourly["coverage"]["ledgers_with_events"], json!(1));
+        // Daily and hourly agree on who was reached.
+        let daily = a.contract_activity(pool, &frame("24h"), Some("day")).await.unwrap();
+        assert_eq!((daily["interval"].clone(), daily["users_reached"].clone()), (json!("day"), json!(1)));
+        // The router was called directly.
+        let r = a.contract_activity(&router, &frame("1h"), None).await.unwrap();
+        assert_eq!((r["users_direct"].clone(), r["direct_calls"][0]["calls"].clone()), (json!(1), json!(1)));
+        // Long frames are daily; hourly is refused once raw data is gone.
+        let all = a.contract_activity(pool, &frame("all"), None).await.unwrap();
+        assert_eq!((all["frame"]["all_time"].clone(), all["users_reached"].clone()), (json!(true), json!(1)));
+        let month = a.contract_activity(pool, &frame("1m"), None).await.unwrap();
+        assert_eq!(month["interval"], "day");
+        assert!(a.contract_activity(pool, &frame("1m"), Some("hour")).await.is_err());
+        assert!(a.contract_activity(pool, &frame("24h"), Some("minute")).await.is_err());
+        // Lists filtered to a frame that ended before the data: nothing.
+        let old = Some((now() - 10 * 86_400, now() - 9 * 86_400));
+        assert!(a.contract_events(token, None, old, 10).await.unwrap().is_empty());
+        assert!(a.contract_calls(&router, old, 10).await.unwrap().is_empty());
+        assert_eq!(a.contract_events(token, Some("transfer"), Some((now() - 60, now() + 60)), 10).await.unwrap().len(), 1);
     }
 
     mod tempdir {
