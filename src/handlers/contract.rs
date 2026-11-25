@@ -52,7 +52,7 @@ pub async fn save_contract_query(pool: &DbPool, req: &HttpRequest, payload: Valu
     
     let chain = payload.get("chain")
         .and_then(|v| v.as_str())
-        .unwrap_or("starknet");
+        .unwrap_or("stellar");
 
     let from_date = payload.get("fromDate")
         .and_then(|v| v.as_str());
