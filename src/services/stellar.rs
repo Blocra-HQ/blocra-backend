@@ -59,6 +59,12 @@ pub struct LedgerInfo {
     pub base_reserve: u32,
     #[serde(default)]
     pub protocol_version: u32,
+    /// Operations in the ledger's transaction set, failed ones included.
+    #[serde(default)]
+    pub tx_set_operation_count: Option<u32>,
+    /// The most operations a ledger's transaction set may hold.
+    #[serde(default)]
+    pub max_tx_set_size: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

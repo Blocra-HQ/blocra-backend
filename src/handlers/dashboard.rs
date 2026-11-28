@@ -168,6 +168,10 @@ pub fn summarize_ledger(
             "tx_types": op_types,
             "base_fee_stroops": ledger.base_fee,
             "protocol_version": ledger.protocol_version,
+            // Ledger capacity: operations in the transaction set out of the
+            // ledger's limit (Stellar's counterpart to gas used / gas limit).
+            "capacity_used": ledger.tx_set_operation_count,
+            "capacity_limit": ledger.max_tx_set_size,
             "transactions_sampled": txs.len()
         },
         "block_info": {
@@ -781,6 +785,7 @@ mod tests {
             sequence: 9, hash: "h".into(), successful_transaction_count: 1, failed_transaction_count: 1,
             operation_count: 3, closed_at: "2026-11-05T22:03:06Z".into(), total_coins: "1".into(),
             fee_pool: "1".into(), base_fee: 100, base_reserve: 5_000_000, protocol_version: 23,
+            tx_set_operation_count: Some(4), max_tx_set_size: Some(1000),
         };
         let tx = |ok: bool, src: &str, fee: &str| HorizonTransaction {
             hash: "t".into(), paging_token: "1".into(), ledger: 9, created_at: String::new(), source_account: src.into(),
@@ -803,6 +808,7 @@ mod tests {
         assert_eq!(s["unique_senders"], 1);
         assert_eq!(s["total_fees"], "0.00004");
         assert_eq!(s["tx_types"]["payment"], 2);
+        assert_eq!((s["capacity_used"].as_u64(), s["capacity_limit"].as_u64()), (Some(4), Some(1000)));
         assert_eq!(out["timestamp"], 1793916186);
     }
 
